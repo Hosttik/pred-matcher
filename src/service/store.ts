@@ -9,10 +9,6 @@ import type {
   Venue
 } from "../core/types.js";
 
-function relationKey(relation: MarketRelation): string {
-  return `${relation.leftId}|${relation.rightId}|${relation.type}|${relation.direction ?? "NONE"}`;
-}
-
 function changed(previous: MarketOpportunity, next: MarketOpportunity): boolean {
   return Math.abs(previous.bestExecution.netEdgePerShare - next.bestExecution.netEdgePerShare) > 0.000001 ||
     Math.abs(previous.bestExecution.netProfit - next.bestExecution.netProfit) > 0.000001 ||
@@ -82,7 +78,7 @@ export class MemoryStore {
 
   applyMarketUpdate(
     market: NormalizedMarket,
-    options: OpportunitySearchOptions = { includeStale: true, maxQuoteAgeMs: 60_000 }
+    options: OpportunitySearchOptions = { includeStale: false, maxQuoteAgeMs: 15_000 }
   ): IncrementalUpdateResult {
     if (!this.markets.has(market.id)) {
       return { marketId: market.id, affectedRelations: 0, opportunities: [], history: [] };
@@ -94,7 +90,6 @@ export class MemoryStore {
       return { marketId: market.id, affectedRelations: 0, opportunities: [], history: [] };
     }
 
-    const relationKeys = new Set(relations.map(relationKey));
     const previous = [...this.opportunities.values()].filter((opportunity) => {
       const involvesMarket = opportunity.legs.some((leg) => leg.marketId === market.id);
       if (!involvesMarket) return false;
@@ -121,7 +116,6 @@ export class MemoryStore {
     }
 
     this.appendHistory(history);
-    void relationKeys;
     return {
       marketId: market.id,
       affectedRelations: relations.length,
