@@ -8,6 +8,14 @@ export interface MarketPrices {
   last?: number;
 }
 
+export interface MarketStructure {
+  strikeType?: string;
+  floorStrike?: number;
+  capStrike?: number;
+  functionalStrike?: string;
+  earlyCloseCondition?: string;
+}
+
 export interface NormalizedMarket {
   id: string;
   venue: Venue;
@@ -16,8 +24,10 @@ export interface NormalizedMarket {
   title: string;
   subtitle?: string;
   rules?: string;
+  resolutionSource?: string;
   closeTime?: string;
   prices: MarketPrices;
+  structure?: MarketStructure;
   sourceUrl?: string;
 }
 
@@ -32,10 +42,40 @@ export interface MarketFeatures {
   deadline?: string;
 }
 
+export type ContractFieldSource = "venue" | "text" | "fallback";
+
+export interface ContractSpec {
+  subjectText: string;
+  predicateText: string;
+  threshold?: number;
+  comparator?: Comparator;
+  deadline?: string;
+  resolutionSource?: string;
+  earlyCloseCondition?: string;
+  rulesText?: string;
+  fieldSources: {
+    threshold?: ContractFieldSource;
+    comparator?: ContractFieldSource;
+    deadline?: ContractFieldSource;
+    resolutionSource?: ContractFieldSource;
+  };
+}
+
+export type ResolutionCompatibility = "MATCH" | "MISMATCH" | "UNKNOWN";
+
+export interface ContractComparison {
+  subjectSimilarity: number;
+  rulesSimilarity: number | null;
+  resolutionCompatibility: ResolutionCompatibility;
+  differences: string[];
+}
+
 export type RelationType =
   | "EQUIVALENT"
+  | "SIMILAR"
   | "THRESHOLD_NESTED"
-  | "TIME_NESTED";
+  | "TIME_NESTED"
+  | "IMPLIES";
 
 export interface MarketRelation {
   leftId: string;
@@ -44,6 +84,7 @@ export interface MarketRelation {
   confidence: number;
   evidence: string[];
   direction?: "LEFT_IMPLIES_RIGHT" | "RIGHT_IMPLIES_LEFT";
+  comparison?: ContractComparison;
 }
 
 export interface SyncResult {

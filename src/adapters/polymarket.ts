@@ -7,6 +7,7 @@ interface PolyMarketRaw {
   slug?: string;
   question?: string;
   description?: string;
+  resolutionSource?: string;
   endDate?: string;
   endDateIso?: string;
   bestBid?: number | string;
@@ -62,6 +63,7 @@ function normalize(raw: PolyMarketRaw): NormalizedMarket | undefined {
       ...(last !== undefined ? { last } : {})
     },
     ...(raw.description ? { rules: raw.description } : {}),
+    ...(raw.resolutionSource ? { resolutionSource: raw.resolutionSource } : {}),
     ...(closeTime ? { closeTime } : {}),
     ...(raw.slug ? { sourceUrl: `https://polymarket.com/market/${raw.slug}` } : {})
   };
