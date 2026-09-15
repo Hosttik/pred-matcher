@@ -1,6 +1,9 @@
 node_modules/
 dist/
 coverage/
-.data/
 .env
 .DS_Store
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
