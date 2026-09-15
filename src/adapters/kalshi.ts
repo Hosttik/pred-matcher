@@ -1,5 +1,5 @@
 import { fetchJson } from "./http.js";
-import type { NormalizedMarket } from "../core/types.js";
+import type { MarketStructure, NormalizedMarket } from "../core/types.js";
 
 interface KalshiMarketRaw {
   ticker?: string;
@@ -16,6 +16,11 @@ interface KalshiMarketRaw {
   no_bid_dollars?: string;
   no_ask_dollars?: string;
   last_price_dollars?: string;
+  strike_type?: string;
+  floor_strike?: number;
+  cap_strike?: number;
+  functional_strike?: string;
+  early_close_condition?: string;
 }
 
 interface KalshiPage {
@@ -27,6 +32,17 @@ function price(value?: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function structure(raw: KalshiMarketRaw): MarketStructure | undefined {
+  const value: MarketStructure = {
+    ...(raw.strike_type ? { strikeType: raw.strike_type } : {}),
+    ...(Number.isFinite(raw.floor_strike) ? { floorStrike: raw.floor_strike } : {}),
+    ...(Number.isFinite(raw.cap_strike) ? { capStrike: raw.cap_strike } : {}),
+    ...(raw.functional_strike ? { functionalStrike: raw.functional_strike } : {}),
+    ...(raw.early_close_condition ? { earlyCloseCondition: raw.early_close_condition } : {})
+  };
+  return Object.keys(value).length > 0 ? value : undefined;
 }
 
 function normalize(raw: KalshiMarketRaw): NormalizedMarket | undefined {
@@ -42,6 +58,7 @@ function normalize(raw: KalshiMarketRaw): NormalizedMarket | undefined {
   const noBid = price(raw.no_bid_dollars);
   const noAsk = price(raw.no_ask_dollars);
   const last = price(raw.last_price_dollars);
+  const marketStructure = structure(raw);
 
   return {
     id: `kalshi:${externalId}`,
@@ -58,7 +75,8 @@ function normalize(raw: KalshiMarketRaw): NormalizedMarket | undefined {
     },
     ...(subtitle ? { subtitle } : {}),
     ...(rules ? { rules } : {}),
-    ...(closeTime ? { closeTime } : {})
+    ...(closeTime ? { closeTime } : {}),
+    ...(marketStructure ? { structure: marketStructure } : {})
   };
 }
 
