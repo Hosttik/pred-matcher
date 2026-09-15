@@ -56,7 +56,7 @@ export class CatalogRefresher {
       }
       this.state.successes += 1;
       this.state.lastSuccessAt = new Date().toISOString();
-      this.state.lastError = undefined;
+      delete this.state.lastError;
       return true;
     } catch (error) {
       this.state.failures += 1;
