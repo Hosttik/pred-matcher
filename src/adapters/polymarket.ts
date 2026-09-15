@@ -1,5 +1,11 @@
 import { fetchJson } from "./http.js";
-import type { NormalizedMarket } from "../core/types.js";
+import type { MarketFee, MarketToken, NormalizedMarket, OutcomeSide } from "../core/types.js";
+
+interface PolyFeeScheduleRaw {
+  exponent?: number;
+  rate?: number;
+  takerOnly?: boolean;
+}
 
 interface PolyMarketRaw {
   id?: string;
@@ -13,7 +19,11 @@ interface PolyMarketRaw {
   bestBid?: number | string;
   bestAsk?: number | string;
   lastTradePrice?: number | string;
+  outcomes?: string | string[];
   outcomePrices?: string | string[];
+  clobTokenIds?: string | string[];
+  feesEnabled?: boolean;
+  feeSchedule?: PolyFeeScheduleRaw;
 }
 
 interface PolyPage {
@@ -30,15 +40,52 @@ function numberOrUndefined(value: unknown): number | undefined {
   return undefined;
 }
 
-function parseOutcomePrices(value: PolyMarketRaw["outcomePrices"]): number[] {
-  if (Array.isArray(value)) return value.map(Number).filter(Number.isFinite);
+function parseStringArray(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) return value.map(String);
   if (typeof value !== "string") return [];
   try {
     const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.map(Number).filter(Number.isFinite) : [];
+    return Array.isArray(parsed) ? parsed.map(String) : [];
   } catch {
     return [];
   }
+}
+
+function parseOutcomePrices(value: PolyMarketRaw["outcomePrices"]): number[] {
+  return parseStringArray(value).map(Number).filter(Number.isFinite);
+}
+
+function outcomeSide(value: string): OutcomeSide | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "yes") return "YES";
+  if (normalized === "no") return "NO";
+  return undefined;
+}
+
+function parseTokens(raw: PolyMarketRaw): MarketToken[] | undefined {
+  const outcomes = parseStringArray(raw.outcomes);
+  const tokenIds = parseStringArray(raw.clobTokenIds);
+  const tokens: MarketToken[] = [];
+
+  for (let index = 0; index < Math.min(outcomes.length, tokenIds.length); index += 1) {
+    const side = outcomeSide(outcomes[index] ?? "");
+    const tokenId = tokenIds[index]?.trim();
+    if (side && tokenId) tokens.push({ side, tokenId });
+  }
+
+  return tokens.length > 0 ? tokens : undefined;
+}
+
+function parseFee(raw: PolyMarketRaw): MarketFee | undefined {
+  if (raw.feesEnabled === undefined && !raw.feeSchedule) return undefined;
+  const rate = numberOrUndefined(raw.feeSchedule?.rate);
+  const exponent = numberOrUndefined(raw.feeSchedule?.exponent);
+  return {
+    enabled: raw.feesEnabled ?? rate !== undefined,
+    ...(rate !== undefined ? { rate } : {}),
+    ...(exponent !== undefined ? { exponent } : {}),
+    ...(raw.feeSchedule?.takerOnly !== undefined ? { takerOnly: raw.feeSchedule.takerOnly } : {})
+  };
 }
 
 function normalize(raw: PolyMarketRaw): NormalizedMarket | undefined {
@@ -51,6 +98,8 @@ function normalize(raw: PolyMarketRaw): NormalizedMarket | undefined {
   const yesAsk = numberOrUndefined(raw.bestAsk);
   const last = numberOrUndefined(raw.lastTradePrice) ?? outcomePrices[0];
   const closeTime = raw.endDateIso ?? raw.endDate;
+  const tokens = parseTokens(raw);
+  const fee = parseFee(raw);
 
   return {
     id: `polymarket:${externalId}`,
@@ -65,6 +114,8 @@ function normalize(raw: PolyMarketRaw): NormalizedMarket | undefined {
     ...(raw.description ? { rules: raw.description } : {}),
     ...(raw.resolutionSource ? { resolutionSource: raw.resolutionSource } : {}),
     ...(closeTime ? { closeTime } : {}),
+    ...(tokens ? { tokens } : {}),
+    ...(fee ? { fee } : {}),
     ...(raw.slug ? { sourceUrl: `https://polymarket.com/market/${raw.slug}` } : {})
   };
 }
@@ -75,8 +126,8 @@ export interface PolymarketOptions {
 }
 
 export async function fetchPolymarketMarkets(options: PolymarketOptions = {}): Promise<NormalizedMarket[]> {
-  const pageSize = Math.min(Math.max(options.pageSize ?? 500, 1), 500);
-  const maxPages = Math.max(options.maxPages ?? 20, 1);
+  const pageSize = Math.min(Math.max(options.pageSize ?? 100, 1), 100);
+  const maxPages = Math.max(options.maxPages ?? 100, 1);
   const markets: NormalizedMarket[] = [];
   let cursor: string | undefined;
 
