@@ -116,6 +116,7 @@ export class KalshiLiveStream {
   private messageId = 1;
   private subscriptionSid: number | undefined;
   private readonly lastSeq = new Map<number, number>();
+  private readonly awaitingSnapshot = new Set<string>();
   private readonly markets = new Map<string, NormalizedMarket>();
 
   constructor(
@@ -147,6 +148,7 @@ export class KalshiLiveStream {
     if (!this.shouldRun) return;
     this.subscriptionSid = undefined;
     this.lastSeq.clear();
+    this.awaitingSnapshot.clear();
     this.callbacks.onState({ status: "CONNECTING", subscribedMarkets: this.markets.size, reconnects: this.reconnects });
     const timestamp = Date.now().toString();
     const socket = new WebSocket("wss://external-api-ws.kalshi.com/trade-api/ws/v2", {
@@ -242,6 +244,7 @@ export class KalshiLiveStream {
       const capturedAt = new Date().toISOString();
       const next = withBooks(market, yesBids, noBids, capturedAt);
       this.markets.set(ticker, next);
+      this.awaitingSnapshot.delete(ticker);
       if (snapshot.sid !== undefined && snapshot.seq !== undefined) this.lastSeq.set(snapshot.sid, snapshot.seq);
       this.callbacks.onMarket(next);
       return;
@@ -253,9 +256,17 @@ export class KalshiLiveStream {
     const market = ticker ? this.markets.get(ticker) : undefined;
     if (!ticker || !market || !deltaMessage.msg?.side) return;
 
+    if (this.awaitingSnapshot.has(ticker)) {
+      if (deltaMessage.sid !== undefined && deltaMessage.seq !== undefined) {
+        this.lastSeq.set(deltaMessage.sid, deltaMessage.seq);
+      }
+      return;
+    }
+
     if (deltaMessage.sid !== undefined && deltaMessage.seq !== undefined) {
       const previous = this.lastSeq.get(deltaMessage.sid);
       if (previous !== undefined && deltaMessage.seq !== previous + 1) {
+        this.awaitingSnapshot.add(ticker);
         this.requestSnapshot(ticker);
         this.lastSeq.set(deltaMessage.sid, deltaMessage.seq);
         return;
