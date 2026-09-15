@@ -84,6 +84,7 @@ export async function hydratePolymarketOrderBooks(
   if (refs.length === 0) return [...markets];
 
   const refByToken = new Map(refs.map((ref) => [ref.tokenId, ref]));
+  const marketById = new Map(markets.map((market) => [market.id, market]));
   const updates = new Map<string, MarketPrices>();
 
   for (const batch of chunks(refs, 100)) {
@@ -97,7 +98,7 @@ export async function hydratePolymarketOrderBooks(
         if (!book.asset_id) continue;
         const ref = refByToken.get(book.asset_id);
         if (!ref) continue;
-        const market = markets.find((candidate) => candidate.id === ref.marketId);
+        const market = marketById.get(ref.marketId);
         if (!market) continue;
         const current = updates.get(ref.marketId) ?? market.prices;
         updates.set(ref.marketId, applyBook(current, ref.side, book));
