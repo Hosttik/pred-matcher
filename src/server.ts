@@ -1,10 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { buildContractSpec } from "./core/contract.js";
-import type { Venue } from "./core/types.js";
+import type { OpportunityType, Venue } from "./core/types.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const store = new MemoryStore();
 let activeSync: Promise<unknown> | undefined;
 
@@ -15,6 +15,10 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 
 function urlFor(request: IncomingMessage): URL {
   return new URL(request.url ?? "/", "http://localhost");
+}
+
+function opportunityType(value: string | null): OpportunityType | undefined {
+  return value === "EQUIVALENT_ARB" || value === "IMPLICATION_ARB" ? value : undefined;
 }
 
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -66,6 +70,32 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const type = url.searchParams.get("type");
     const relations = store.listRelations().filter((relation) => !type || relation.type === type);
     json(response, 200, { count: relations.length, relations });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/opportunities") {
+    const typeParam = url.searchParams.get("type");
+    const type = opportunityType(typeParam);
+    if (typeParam && !type) {
+      json(response, 400, { error: "invalid_opportunity_type" });
+      return;
+    }
+
+    const minimumParam = url.searchParams.get("minGrossEdge");
+    const minimumGrossEdge = minimumParam === null ? 0 : Number(minimumParam);
+    if (!Number.isFinite(minimumGrossEdge) || minimumGrossEdge < 0) {
+      json(response, 400, { error: "invalid_min_gross_edge" });
+      return;
+    }
+
+    const opportunities = store.listOpportunities().filter((opportunity) =>
+      (!type || opportunity.type === type) && opportunity.grossEdgePerShare >= minimumGrossEdge
+    );
+    json(response, 200, {
+      count: opportunities.length,
+      feesIncluded: false,
+      opportunities
+    });
     return;
   }
 
