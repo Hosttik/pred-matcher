@@ -28,9 +28,9 @@ async function kalshiCredentialsFromEnv(): Promise<KalshiLiveCredentials | undef
 }
 
 export class LiveScanner {
-  private polymarket?: PolymarketLiveStream;
-  private kalshi?: KalshiLiveStream;
-  private writer?: JsonlHistoryWriter;
+  private polymarket: PolymarketLiveStream | undefined;
+  private kalshi: KalshiLiveStream | undefined;
+  private writer: JsonlHistoryWriter | undefined;
   private state: LiveScannerStatus = {
     running: false,
     updatesApplied: 0,
