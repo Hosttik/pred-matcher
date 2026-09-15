@@ -49,7 +49,7 @@ interface SubscribedMessage {
   msg?: { sid?: number; channel?: string };
 }
 
-type KalshiMessage = SnapshotMessage | DeltaMessage | SubscribedMessage | { type?: string; msg?: unknown; sid?: number; seq?: number };
+type KalshiMessage = { type?: string; sid?: number; seq?: number; [key: string]: unknown };
 
 function sign(privateKeyPem: string, timestamp: string): string {
   const signer = createSign("RSA-SHA256");
@@ -109,12 +109,12 @@ function withBooks(market: NormalizedMarket, yesBids: OrderBookLevel[], noBids: 
 }
 
 export class KalshiLiveStream {
-  private socket?: WebSocket;
-  private reconnectTimer?: NodeJS.Timeout;
+  private socket: WebSocket | undefined;
+  private reconnectTimer: NodeJS.Timeout | undefined;
   private shouldRun = false;
   private reconnects = 0;
   private messageId = 1;
-  private subscriptionSid?: number;
+  private subscriptionSid: number | undefined;
   private readonly lastSeq = new Map<number, number>();
   private readonly markets = new Map<string, NormalizedMarket>();
 
@@ -172,13 +172,14 @@ export class KalshiLiveStream {
     });
 
     socket.on("message", (data) => {
-      let message: KalshiMessage;
+      let parsed: unknown;
       try {
-        message = JSON.parse(data.toString()) as KalshiMessage;
+        parsed = JSON.parse(data.toString());
       } catch {
         return;
       }
-      this.applyMessage(message);
+      if (!parsed || typeof parsed !== "object") return;
+      this.applyMessage(parsed as KalshiMessage);
       this.callbacks.onState({
         status: "LIVE",
         subscribedMarkets: this.markets.size,
@@ -225,55 +226,58 @@ export class KalshiLiveStream {
 
   private applyMessage(message: KalshiMessage): void {
     if (message.type === "subscribed") {
-      const sid = message.msg?.sid;
+      const subscribed = message as unknown as SubscribedMessage;
+      const sid = subscribed.msg?.sid;
       if (sid !== undefined) this.subscriptionSid = sid;
       return;
     }
 
     if (message.type === "orderbook_snapshot") {
-      const ticker = message.msg?.market_ticker;
+      const snapshot = message as unknown as SnapshotMessage;
+      const ticker = snapshot.msg?.market_ticker;
       const market = ticker ? this.markets.get(ticker) : undefined;
       if (!ticker || !market) return;
-      const yesBids = bidLevels(message.msg?.yes_dollars_fp);
-      const noBids = bidLevels(message.msg?.no_dollars_fp, true);
+      const yesBids = bidLevels(snapshot.msg?.yes_dollars_fp);
+      const noBids = bidLevels(snapshot.msg?.no_dollars_fp, true);
       const capturedAt = new Date().toISOString();
       const next = withBooks(market, yesBids, noBids, capturedAt);
       this.markets.set(ticker, next);
-      if (message.sid !== undefined && message.seq !== undefined) this.lastSeq.set(message.sid, message.seq);
+      if (snapshot.sid !== undefined && snapshot.seq !== undefined) this.lastSeq.set(snapshot.sid, snapshot.seq);
       this.callbacks.onMarket(next);
       return;
     }
 
     if (message.type !== "orderbook_delta") return;
-    const ticker = message.msg?.market_ticker;
+    const deltaMessage = message as unknown as DeltaMessage;
+    const ticker = deltaMessage.msg?.market_ticker;
     const market = ticker ? this.markets.get(ticker) : undefined;
-    if (!ticker || !market || !message.msg?.side) return;
+    if (!ticker || !market || !deltaMessage.msg?.side) return;
 
-    if (message.sid !== undefined && message.seq !== undefined) {
-      const previous = this.lastSeq.get(message.sid);
-      if (previous !== undefined && message.seq !== previous + 1) {
+    if (deltaMessage.sid !== undefined && deltaMessage.seq !== undefined) {
+      const previous = this.lastSeq.get(deltaMessage.sid);
+      if (previous !== undefined && deltaMessage.seq !== previous + 1) {
         this.requestSnapshot(ticker);
-        this.lastSeq.set(message.sid, message.seq);
+        this.lastSeq.set(deltaMessage.sid, deltaMessage.seq);
         return;
       }
-      this.lastSeq.set(message.sid, message.seq);
+      this.lastSeq.set(deltaMessage.sid, deltaMessage.seq);
     }
 
-    const rawPrice = Number(message.msg.price_dollars);
-    const delta = Number(message.msg.delta_fp);
+    const rawPrice = Number(deltaMessage.msg.price_dollars);
+    const delta = Number(deltaMessage.msg.delta_fp);
     if (!Number.isFinite(rawPrice) || !Number.isFinite(delta)) return;
     const yesBids = [...(market.books?.YES?.bids ?? [])];
     const noBids = [...(market.books?.NO?.bids ?? [])];
-    if (message.msg.side === "yes") {
+    if (deltaMessage.msg.side === "yes") {
       const nextYes = addDelta(yesBids, rawPrice, delta);
-      const capturedAt = message.msg.ts ?? new Date().toISOString();
+      const capturedAt = deltaMessage.msg.ts ?? new Date().toISOString();
       const next = withBooks(market, nextYes, noBids, capturedAt);
       this.markets.set(ticker, next);
       this.callbacks.onMarket(next);
     } else {
       const noPrice = 1 - rawPrice;
       const nextNo = addDelta(noBids, noPrice, delta);
-      const capturedAt = message.msg.ts ?? new Date().toISOString();
+      const capturedAt = deltaMessage.msg.ts ?? new Date().toISOString();
       const next = withBooks(market, yesBids, nextNo, capturedAt);
       this.markets.set(ticker, next);
       this.callbacks.onMarket(next);
