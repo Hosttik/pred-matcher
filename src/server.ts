@@ -271,9 +271,9 @@ async function initializeRuntime(): Promise<void> {
   const autoLive = process.env.PRED_MATCHER_LIVE_AUTO_START === "true";
   const autoCatalog = process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false";
 
+  if (autoCatalog) catalogRefresher.start(false);
   if (!store.getLastSync() && (autoCatalog || autoLive)) await performSync();
   if (autoLive && store.getLastSync()) await liveScanner.start();
-  if (autoCatalog) catalogRefresher.start(false);
 }
 
 if (process.env.NODE_ENV !== "test") {
