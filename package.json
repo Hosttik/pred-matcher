@@ -1,0 +1,25 @@
+{
+  "name": "pred-matcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prediction-market relation engine for Polymarket and Kalshi.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "24.13.4",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0"
+  }
+}
