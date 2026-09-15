@@ -195,6 +195,48 @@ export interface MarketOpportunity {
   fees: OpportunityFeeAssessment;
 }
 
+export type OpportunityHistoryKind = "OPEN" | "UPDATE" | "CLOSE";
+
+export interface OpportunityHistoryEvent {
+  sequence: number;
+  kind: OpportunityHistoryKind;
+  opportunityId: string;
+  capturedAt: string;
+  type: OpportunityType;
+  relationType: RelationType;
+  netEdgePerShare: number;
+  netProfit: number;
+  maxProfitableShares: number;
+  quoteAgeMs: number;
+}
+
+export type LiveConnectionStatus = "DISCONNECTED" | "CONNECTING" | "LIVE" | "DEGRADED" | "ERROR";
+
+export interface LiveVenueState {
+  venue: Venue;
+  status: LiveConnectionStatus;
+  subscribedMarkets: number;
+  lastMessageAt?: string;
+  reconnects: number;
+  error?: string;
+  reason?: string;
+}
+
+export interface LiveScannerStatus {
+  running: boolean;
+  startedAt?: string;
+  updatesApplied: number;
+  recomputations: number;
+  venues: Record<Venue, LiveVenueState>;
+}
+
+export interface IncrementalUpdateResult {
+  marketId: string;
+  affectedRelations: number;
+  opportunities: MarketOpportunity[];
+  history: OpportunityHistoryEvent[];
+}
+
 export interface SyncResult {
   fetched: Record<Venue, number>;
   totalMarkets: number;
