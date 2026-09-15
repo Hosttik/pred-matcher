@@ -40,8 +40,7 @@ interface PolyTickMessage {
   timestamp?: string;
 }
 
-type PolyMessage = PolyBookMessage | PolyPriceChangeMessage | PolyTickMessage | { event_type?: string };
-
+type PolyMessage = { event_type?: string; [key: string]: unknown };
 type StateUpdate = Omit<LiveVenueState, "venue">;
 
 export interface PolymarketLiveCallbacks {
@@ -92,9 +91,9 @@ function withBestPrices(market: NormalizedMarket): NormalizedMarket {
 }
 
 export class PolymarketLiveStream {
-  private socket?: WebSocket;
-  private heartbeat?: NodeJS.Timeout;
-  private reconnectTimer?: NodeJS.Timeout;
+  private socket: WebSocket | undefined;
+  private heartbeat: NodeJS.Timeout | undefined;
+  private reconnectTimer: NodeJS.Timeout | undefined;
   private shouldRun = false;
   private reconnects = 0;
   private readonly markets = new Map<string, NormalizedMarket>();
@@ -157,7 +156,9 @@ export class PolymarketLiveStream {
         return;
       }
       const messages = Array.isArray(parsed) ? parsed : [parsed];
-      for (const message of messages) this.applyMessage(message as PolyMessage);
+      for (const message of messages) {
+        if (message && typeof message === "object") this.applyMessage(message as PolyMessage);
+      }
       this.callbacks.onState({
         status: "LIVE",
         subscribedMarkets: this.markets.size,
@@ -193,14 +194,15 @@ export class PolymarketLiveStream {
 
   private applyMessage(message: PolyMessage): void {
     if (message.event_type === "book") {
-      const ref = this.tokens.get(message.asset_id);
+      const bookMessage = message as unknown as PolyBookMessage;
+      const ref = this.tokens.get(bookMessage.asset_id);
       if (!ref) return;
       const market = this.markets.get(ref.marketId);
       if (!market) return;
-      const time = timestamp(message.timestamp);
+      const time = timestamp(bookMessage.timestamp);
       const book: OutcomeOrderBook = {
-        asks: parsedLevels(message.asks),
-        bids: parsedLevels(message.bids).sort((a, b) => b.price - a.price),
+        asks: parsedLevels(bookMessage.asks),
+        bids: parsedLevels(bookMessage.bids).sort((a, b) => b.price - a.price),
         capturedAt: time.capturedAt,
         ...(time.sourceTimestamp ? { sourceTimestamp: time.sourceTimestamp } : {})
       };
@@ -208,14 +210,15 @@ export class PolymarketLiveStream {
         ...market,
         books: { ...market.books, [ref.side]: book }
       });
-      this.readyTokens.add(message.asset_id);
+      this.readyTokens.add(bookMessage.asset_id);
       this.markets.set(market.id, next);
       this.callbacks.onMarket(next);
       return;
     }
 
     if (message.event_type === "price_change") {
-      for (const change of message.price_changes ?? []) {
+      const priceMessage = message as unknown as PolyPriceChangeMessage;
+      for (const change of priceMessage.price_changes ?? []) {
         if (!change.asset_id || !this.readyTokens.has(change.asset_id)) continue;
         const ref = this.tokens.get(change.asset_id);
         if (!ref) continue;
@@ -224,7 +227,7 @@ export class PolymarketLiveStream {
         const price = Number(change.price);
         const size = Number(change.size);
         if (!market || !current || !Number.isFinite(price) || !Number.isFinite(size) || !change.side) continue;
-        const time = timestamp(message.timestamp);
+        const time = timestamp(priceMessage.timestamp);
         const bids = current.bids ?? [];
         const nextBook: OutcomeOrderBook = change.side === "BUY"
           ? {
@@ -246,10 +249,12 @@ export class PolymarketLiveStream {
       return;
     }
 
-    if (message.event_type === "tick_size_change" && message.asset_id) {
-      const ref = this.tokens.get(message.asset_id);
+    if (message.event_type === "tick_size_change") {
+      const tickMessage = message as unknown as PolyTickMessage;
+      if (!tickMessage.asset_id) return;
+      const ref = this.tokens.get(tickMessage.asset_id);
       const market = ref ? this.markets.get(ref.marketId) : undefined;
-      const tickSize = Number(message.new_tick_size);
+      const tickSize = Number(tickMessage.new_tick_size);
       if (!market || !Number.isFinite(tickSize) || tickSize <= 0) return;
       const next = { ...market, execution: { ...market.execution, tickSize } };
       this.markets.set(market.id, next);
