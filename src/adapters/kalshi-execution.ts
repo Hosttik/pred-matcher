@@ -68,10 +68,11 @@ async function fetchEvent(eventId: string): Promise<EventFeeInfo> {
       new URL(`https://external-api.kalshi.com/trade-api/v2/events/${encodeURIComponent(eventId)}`)
     );
     const event = response.event;
+    const multiplier = event?.fee_multiplier_override;
     return {
       ...(event?.series_ticker ? { seriesTicker: event.series_ticker } : {}),
       ...(event?.fee_type_override ? { feeTypeOverride: event.fee_type_override } : {}),
-      ...(Number.isFinite(event?.fee_multiplier_override) ? { feeMultiplierOverride: event?.fee_multiplier_override } : {})
+      ...(typeof multiplier === "number" && Number.isFinite(multiplier) ? { feeMultiplierOverride: multiplier } : {})
     };
   } catch {
     return {};
@@ -84,9 +85,10 @@ async function fetchSeries(seriesTicker: string): Promise<SeriesFeeInfo> {
       new URL(`https://external-api.kalshi.com/trade-api/v2/series/${encodeURIComponent(seriesTicker)}`)
     );
     const series = response.series;
+    const multiplier = series?.fee_multiplier;
     return {
       ...(series?.fee_type ? { feeType: series.fee_type } : {}),
-      ...(Number.isFinite(series?.fee_multiplier) ? { feeMultiplier: series?.fee_multiplier } : {})
+      ...(typeof multiplier === "number" && Number.isFinite(multiplier) ? { feeMultiplier: multiplier } : {})
     };
   } catch {
     return {};
