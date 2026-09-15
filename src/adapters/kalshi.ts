@@ -12,7 +12,9 @@ interface KalshiMarketRaw {
   close_time?: string;
   expected_expiration_time?: string;
   yes_bid_dollars?: string;
+  yes_bid_size_fp?: string;
   yes_ask_dollars?: string;
+  yes_ask_size_fp?: string;
   no_bid_dollars?: string;
   no_ask_dollars?: string;
   last_price_dollars?: string;
@@ -28,7 +30,7 @@ interface KalshiPage {
   cursor?: string;
 }
 
-function price(value?: string): number | undefined {
+function decimal(value?: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
@@ -57,11 +59,13 @@ function normalize(raw: KalshiMarketRaw): NormalizedMarket | undefined {
   const rules = [raw.rules_primary, raw.rules_secondary].filter(Boolean).join("\n\n") || undefined;
   const subtitle = raw.subtitle ?? raw.yes_sub_title;
   const closeTime = raw.expected_expiration_time ?? raw.close_time;
-  const yesBid = price(raw.yes_bid_dollars);
-  const yesAsk = price(raw.yes_ask_dollars);
-  const noBid = price(raw.no_bid_dollars);
-  const noAsk = price(raw.no_ask_dollars);
-  const last = price(raw.last_price_dollars);
+  const yesBid = decimal(raw.yes_bid_dollars);
+  const yesAsk = decimal(raw.yes_ask_dollars);
+  const noBid = decimal(raw.no_bid_dollars) ?? (yesAsk !== undefined ? 1 - yesAsk : undefined);
+  const noAsk = decimal(raw.no_ask_dollars) ?? (yesBid !== undefined ? 1 - yesBid : undefined);
+  const yesBidSize = decimal(raw.yes_bid_size_fp);
+  const yesAskSize = decimal(raw.yes_ask_size_fp);
+  const last = decimal(raw.last_price_dollars);
   const marketStructure = structure(raw);
 
   return {
@@ -75,6 +79,8 @@ function normalize(raw: KalshiMarketRaw): NormalizedMarket | undefined {
       ...(yesAsk !== undefined ? { yesAsk } : {}),
       ...(noBid !== undefined ? { noBid } : {}),
       ...(noAsk !== undefined ? { noAsk } : {}),
+      ...(yesBidSize !== undefined ? { yesBidSize, noAskSize: yesBidSize } : {}),
+      ...(yesAskSize !== undefined ? { yesAskSize, noBidSize: yesAskSize } : {}),
       ...(last !== undefined ? { last } : {})
     },
     ...(subtitle ? { subtitle } : {}),
