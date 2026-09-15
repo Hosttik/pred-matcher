@@ -1,13 +1,26 @@
-import type { MarketRelation, NormalizedMarket, SyncResult, Venue } from "../core/types.js";
+import type {
+  MarketOpportunity,
+  MarketRelation,
+  NormalizedMarket,
+  SyncResult,
+  Venue
+} from "../core/types.js";
 
 export class MemoryStore {
   private markets = new Map<string, NormalizedMarket>();
   private relations: MarketRelation[] = [];
+  private opportunities: MarketOpportunity[] = [];
   private lastSync?: SyncResult;
 
-  replace(markets: NormalizedMarket[], relations: MarketRelation[], result: SyncResult): void {
+  replace(
+    markets: NormalizedMarket[],
+    relations: MarketRelation[],
+    opportunities: MarketOpportunity[],
+    result: SyncResult
+  ): void {
     this.markets = new Map(markets.map((market) => [market.id, market]));
     this.relations = [...relations];
+    this.opportunities = [...opportunities];
     this.lastSync = result;
   }
 
@@ -21,6 +34,10 @@ export class MemoryStore {
 
   listRelations(): MarketRelation[] {
     return [...this.relations];
+  }
+
+  listOpportunities(): MarketOpportunity[] {
+    return [...this.opportunities];
   }
 
   getLastSync(): SyncResult | undefined {
