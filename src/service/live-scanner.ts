@@ -98,6 +98,7 @@ export class LiveScanner {
     const reasons = states.flatMap((state) => state.reason ? [state.reason] : []);
     const persistenceFailure = this.persistenceFailures[venue];
     if (persistenceFailure) reasons.push("persistence_write_failed");
+    const lastMessageAt = newest(states.map((state) => state.lastMessageAt));
 
     this.state.venues[venue] = {
       venue,
@@ -105,9 +106,7 @@ export class LiveScanner {
       subscribedMarkets: states.reduce((sum, state) => sum + state.subscribedMarkets, 0),
       connections: states.length,
       reconnects: states.reduce((sum, state) => sum + state.reconnects, 0),
-      ...(newest(states.map((state) => state.lastMessageAt)) ? {
-        lastMessageAt: newest(states.map((state) => state.lastMessageAt))
-      } : {}),
+      ...(lastMessageAt ? { lastMessageAt } : {}),
       ...(errors.length > 0 ? { error: [...new Set(errors)].join("; ") } : {}),
       ...(reasons.length > 0 ? { reason: [...new Set(reasons)].join("; ") } : {})
     };
