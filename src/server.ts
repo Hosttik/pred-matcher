@@ -1,9 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { syncAll } from "./service/sync.js";
-import { MemoryStore } from "./service/store.js";
+import { buildContractSpec } from "./core/contract.js";
 import type { Venue } from "./core/types.js";
+import { MemoryStore } from "./service/store.js";
+import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const store = new MemoryStore();
 let activeSync: Promise<unknown> | undefined;
 
@@ -43,6 +44,21 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const venue = venueParam === "polymarket" || venueParam === "kalshi" ? venueParam as Venue : undefined;
     const markets = store.listMarkets(venue);
     json(response, 200, { count: markets.length, markets });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/contracts") {
+    const marketId = url.searchParams.get("marketId");
+    if (!marketId) {
+      json(response, 400, { error: "market_id_required" });
+      return;
+    }
+    const market = store.getMarket(marketId);
+    if (!market) {
+      json(response, 404, { error: "market_not_found" });
+      return;
+    }
+    json(response, 200, { marketId: market.id, contract: buildContractSpec(market) });
     return;
   }
 
