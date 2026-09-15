@@ -80,9 +80,12 @@ function parseFee(raw: PolyMarketRaw): MarketFee | undefined {
   if (raw.feesEnabled === undefined && !raw.feeSchedule) return undefined;
   const rate = numberOrUndefined(raw.feeSchedule?.rate);
   const exponent = numberOrUndefined(raw.feeSchedule?.exponent);
+  const enabled = raw.feesEnabled ?? (rate !== undefined && rate > 0);
   return {
-    enabled: raw.feesEnabled ?? rate !== undefined,
-    ...(rate !== undefined ? { rate } : {}),
+    enabled,
+    model: rate !== undefined || !enabled ? "POLYMARKET_CURVE" : "UNSUPPORTED",
+    source: "gamma",
+    ...(rate !== undefined ? { rate } : !enabled ? { rate: 0 } : {}),
     ...(exponent !== undefined ? { exponent } : {}),
     ...(raw.feeSchedule?.takerOnly !== undefined ? { takerOnly: raw.feeSchedule.takerOnly } : {})
   };
@@ -105,6 +108,7 @@ function normalize(raw: PolyMarketRaw): NormalizedMarket | undefined {
     id: `polymarket:${externalId}`,
     venue: "polymarket",
     externalId,
+    ...(raw.conditionId ? { conditionId: raw.conditionId } : {}),
     title,
     prices: {
       ...(yesBid !== undefined ? { yesBid } : {}),

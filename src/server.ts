@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { buildContractSpec } from "./core/contract.js";
+import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const store = new MemoryStore();
 let activeSync: Promise<unknown> | undefined;
 
@@ -19,6 +20,18 @@ function urlFor(request: IncomingMessage): URL {
 
 function opportunityType(value: string | null): OpportunityType | undefined {
   return value === "EQUIVALENT_ARB" || value === "IMPLICATION_ARB" ? value : undefined;
+}
+
+function nonNegativeNumber(value: string | null, fallback: number): number | undefined {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function positiveNumber(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -81,19 +94,35 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       return;
     }
 
-    const minimumParam = url.searchParams.get("minGrossEdge");
-    const minimumGrossEdge = minimumParam === null ? 0 : Number(minimumParam);
-    if (!Number.isFinite(minimumGrossEdge) || minimumGrossEdge < 0) {
-      json(response, 400, { error: "invalid_min_gross_edge" });
+    const minimumGrossEdge = nonNegativeNumber(url.searchParams.get("minGrossEdge"), 0);
+    const minimumNetEdge = nonNegativeNumber(url.searchParams.get("minNetEdge"), 0);
+    const maxQuoteAgeMs = positiveNumber(url.searchParams.get("maxQuoteAgeMs")) ?? 15_000;
+    const targetParam = url.searchParams.get("targetShares");
+    const targetShares = positiveNumber(targetParam);
+    if (minimumGrossEdge === undefined || minimumNetEdge === undefined) {
+      json(response, 400, { error: "invalid_edge_filter" });
+      return;
+    }
+    if (targetParam !== null && targetShares === undefined) {
+      json(response, 400, { error: "invalid_target_shares" });
       return;
     }
 
-    const opportunities = store.listOpportunities().filter((opportunity) =>
-      (!type || opportunity.type === type) && opportunity.grossEdgePerShare >= minimumGrossEdge
-    );
+    const includeStale = url.searchParams.get("includeStale") === "true";
+    const opportunities = findOpportunities(store.listMarkets(), store.listRelations(), {
+      minimumGrossEdge,
+      minimumNetEdge,
+      maxQuoteAgeMs,
+      includeStale,
+      ...(targetShares !== undefined ? { targetShares } : {})
+    }).filter((opportunity) => !type || opportunity.type === type);
+
     json(response, 200, {
       count: opportunities.length,
-      feesIncluded: false,
+      feesIncluded: true,
+      depthIncluded: true,
+      staleQuotesIncluded: includeStale,
+      targetShares: targetShares ?? null,
       opportunities
     });
     return;

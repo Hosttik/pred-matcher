@@ -1,3 +1,4 @@
+import { hydrateKalshiExecutionData } from "../adapters/kalshi-execution.js";
 import { fetchKalshiMarkets } from "../adapters/kalshi.js";
 import { hydratePolymarketOrderBooks } from "../adapters/polymarket-orderbook.js";
 import { fetchPolymarketMarkets } from "../adapters/polymarket.js";
@@ -31,8 +32,13 @@ export async function syncAll(store: MemoryStore): Promise<SyncResult> {
 
   const markets: NormalizedMarket[] = [...polymarket, ...kalshi];
   const { candidatePairs, relations } = matchMarkets(markets);
-  const hydratedMarkets = await hydratePolymarketOrderBooks(markets, opportunityMarketIds(relations));
-  const opportunities = findOpportunities(hydratedMarkets, relations);
+  const relevantIds = opportunityMarketIds(relations);
+  const withPolymarketDepth = await hydratePolymarketOrderBooks(markets, relevantIds);
+  const hydratedMarkets = await hydrateKalshiExecutionData(withPolymarketDepth, relevantIds);
+  const opportunities = findOpportunities(hydratedMarkets, relations, {
+    includeStale: true,
+    maxQuoteAgeMs: 60_000
+  });
   const result: SyncResult = {
     fetched: { polymarket: polymarket.length, kalshi: kalshi.length },
     totalMarkets: hydratedMarkets.length,

@@ -1,6 +1,18 @@
 export type Venue = "polymarket" | "kalshi";
 export type OutcomeSide = "YES" | "NO";
 
+export interface OrderBookLevel {
+  price: number;
+  size: number;
+}
+
+export interface OutcomeOrderBook {
+  asks: OrderBookLevel[];
+  bids?: OrderBookLevel[];
+  capturedAt: string;
+  sourceTimestamp?: string;
+}
+
 export interface MarketPrices {
   yesBid?: number;
   yesAsk?: number;
@@ -18,11 +30,22 @@ export interface MarketToken {
   tokenId: string;
 }
 
+export type FeeModel = "POLYMARKET_CURVE" | "KALSHI_QUADRATIC" | "UNSUPPORTED";
+
 export interface MarketFee {
   enabled: boolean;
+  model?: FeeModel;
   rate?: number;
   exponent?: number;
+  multiplier?: number;
+  feeType?: string;
   takerOnly?: boolean;
+  source?: "gamma" | "clob" | "series" | "event_override";
+}
+
+export interface MarketExecutionMetadata {
+  minOrderSize?: number;
+  tickSize?: number;
 }
 
 export interface MarketStructure {
@@ -37,15 +60,19 @@ export interface NormalizedMarket {
   id: string;
   venue: Venue;
   externalId: string;
+  conditionId?: string;
   eventId?: string;
+  seriesTicker?: string;
   title: string;
   subtitle?: string;
   rules?: string;
   resolutionSource?: string;
   closeTime?: string;
   prices: MarketPrices;
+  books?: Partial<Record<OutcomeSide, OutcomeOrderBook>>;
   tokens?: MarketToken[];
   fee?: MarketFee;
+  execution?: MarketExecutionMetadata;
   structure?: MarketStructure;
   sourceUrl?: string;
 }
@@ -116,9 +143,33 @@ export interface OpportunityLeg {
   availableShares?: number;
 }
 
+export interface ExecutedLegQuote {
+  marketId: string;
+  venue: Venue;
+  side: OutcomeSide;
+  shares: number;
+  positionCost: number;
+  fee: number;
+  totalCost: number;
+  vwap: number;
+  worstPrice: number;
+}
+
+export interface ExecutionQuote {
+  shares: number;
+  legs: [ExecutedLegQuote, ExecutedLegQuote];
+  grossPositionCost: number;
+  totalFees: number;
+  netCost: number;
+  guaranteedPayout: number;
+  netProfit: number;
+  netEdgePerShare: number;
+  netEdgePercent: number;
+}
+
 export interface OpportunityFeeAssessment {
-  status: "NOT_INCLUDED";
-  reason: string;
+  status: "INCLUDED";
+  models: [FeeModel, FeeModel];
 }
 
 export interface MarketOpportunity {
@@ -133,6 +184,14 @@ export interface MarketOpportunity {
   grossEdgePercent: number;
   maxShares?: number;
   grossProfitAtTop?: number;
+  maxExecutableShares: number;
+  maxProfitableShares: number;
+  bestExecution: ExecutionQuote;
+  targetExecution?: ExecutionQuote;
+  oldestQuoteAt: string;
+  quoteAgeMs: number;
+  staleAfterMs: number;
+  isStale: boolean;
   fees: OpportunityFeeAssessment;
 }
 
