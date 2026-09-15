@@ -1,8 +1,8 @@
 {
   "name": "pred-matcher",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Prediction-market relation, contract verification, and gross opportunity engine for Polymarket and Kalshi.",
+  "description": "Prediction-market relation, contract verification, and net executable opportunity engine for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0"
