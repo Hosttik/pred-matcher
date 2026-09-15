@@ -66,6 +66,7 @@ export class LiveScanner {
     kalshi: new Map()
   };
   private readonly persistenceFailures: Partial<Record<Venue, string>> = {};
+  private readonly jsonlFailures: Partial<Record<Venue, string>> = {};
   private state: LiveScannerStatus = {
     running: false,
     updatesApplied: 0,
@@ -97,12 +98,15 @@ export class LiveScanner {
     const errors = states.flatMap((state) => state.error ? [state.error] : []);
     const reasons = states.flatMap((state) => state.reason ? [state.reason] : []);
     const persistenceFailure = this.persistenceFailures[venue];
+    const jsonlFailure = this.jsonlFailures[venue];
     if (persistenceFailure) reasons.push("persistence_write_failed");
+    if (jsonlFailure) reasons.push("jsonl_history_persistence_failed");
     const lastMessageAt = newest(states.map((state) => state.lastMessageAt));
+    const storageDegraded = Boolean(persistenceFailure || jsonlFailure);
 
     this.state.venues[venue] = {
       venue,
-      status: persistenceFailure ? "DEGRADED" : aggregateStatus(states),
+      status: storageDegraded ? "DEGRADED" : aggregateStatus(states),
       subscribedMarkets: states.reduce((sum, state) => sum + state.subscribedMarkets, 0),
       connections: states.length,
       reconnects: states.reduce((sum, state) => sum + state.reconnects, 0),
@@ -131,10 +135,15 @@ export class LiveScanner {
     }
 
     if (this.writer && result.history.length > 0) {
-      void this.writer.write(result.history).catch(() => {
-        this.persistenceFailures[market.venue] = "jsonl_history_persistence_failed";
-        this.recomputeVenueState(market.venue);
-      });
+      void this.writer.write(result.history)
+        .then(() => {
+          delete this.jsonlFailures[market.venue];
+          this.recomputeVenueState(market.venue);
+        })
+        .catch(() => {
+          this.jsonlFailures[market.venue] = "jsonl_history_persistence_failed";
+          this.recomputeVenueState(market.venue);
+        });
     }
   }
 
@@ -150,16 +159,20 @@ export class LiveScanner {
     const kalshiMarkets = markets.filter((market) => market.venue === "kalshi");
     const polymarketChunkSize = configuredPositiveInt("PRED_MATCHER_POLYMARKET_WS_MARKETS_PER_CONNECTION", 250);
     const kalshiChunkSize = configuredPositiveInt("PRED_MATCHER_KALSHI_WS_MARKETS_PER_CONNECTION", 200);
+    const updatesApplied = this.state.updatesApplied;
+    const recomputations = this.state.recomputations;
 
     this.streamStates.polymarket.clear();
     this.streamStates.kalshi.clear();
     delete this.persistenceFailures.polymarket;
     delete this.persistenceFailures.kalshi;
+    delete this.jsonlFailures.polymarket;
+    delete this.jsonlFailures.kalshi;
     this.state = {
       running: true,
       startedAt: new Date().toISOString(),
-      updatesApplied: 0,
-      recomputations: 0,
+      updatesApplied,
+      recomputations,
       venues: {
         polymarket: disconnected("polymarket"),
         kalshi: disconnected("kalshi")
