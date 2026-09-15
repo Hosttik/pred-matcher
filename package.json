@@ -1,8 +1,8 @@
 {
   "name": "pred-matcher",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "Prediction-market relation, contract verification, and net executable opportunity engine for Polymarket and Kalshi.",
+  "description": "Live prediction-market relation, verification, and executable opportunity scanner for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0"
@@ -15,9 +15,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "npm run typecheck && npm test"
   },
-  "dependencies": {},
+  "dependencies": {
+    "ws": "8.21.3"
+  },
   "devDependencies": {
     "@types/node": "24.13.4",
+    "@types/ws": "8.18.1",
     "tsx": "4.23.13",
     "typescript": "7.0.2",
     "vitest": "5.0.0"

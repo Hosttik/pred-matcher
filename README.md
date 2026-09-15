@@ -1,33 +1,32 @@
 # pred-matcher
 
-Prediction-market relation, contract verification, and net executable opportunity engine for Polymarket and Kalshi.
+Live prediction-market relation, contract verification, and net executable opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.4.0**.
+Current version: **0.5.0**.
 
 ## Scope
 
 - Public Polymarket Gamma ingestion.
 - Public Kalshi Markets API ingestion.
-- Common normalized market model.
-- Indexed title/subtitle candidate retrieval without a naive full cross-product.
-- Structured contract parsing with field provenance (`venue`, `text`, `fallback`).
-- Settlement verification using resolution sources, rules similarity, thresholds, deadlines, comparator families, and early-close conditions when available.
+- Indexed cross-venue candidate retrieval and structured contract verification.
 - Relations: `EQUIVALENT`, `SIMILAR`, `THRESHOLD_NESTED`, `TIME_NESTED`, `IMPLIES`.
-- Full-depth Polymarket CLOB YES/NO order books for markets participating in strong relations.
-- Full-depth Kalshi YES/NO books derived from public bid books.
-- Venue fee metadata and taker-fee calculation.
-- VWAP/slippage simulation for arbitrary target sizes.
-- Quote freshness checks and stale-snapshot filtering.
-- Maximum executable and maximum still-profitable size estimates.
-- In-memory HTTP API for markets, parsed contracts, relations, and opportunities.
+- Full-depth Polymarket and Kalshi books for markets participating in strong relations.
+- Venue fee metadata, VWAP/slippage simulation, quote freshness, and target-size execution checks.
+- Public Polymarket CLOB WebSocket streaming.
+- Authenticated Kalshi orderbook WebSocket streaming when read credentials are configured.
+- Incremental opportunity recomputation: only relations touching an updated market are rescanned.
+- Opportunity lifecycle history: `OPEN`, `UPDATE`, `CLOSE`.
+- Optional append-only JSONL persistence for opportunity history.
 
 ## Requirements
 
 - Node.js 24+
 - npm 11+
 
-Pinned development versions:
+Pinned versions:
 
+- `ws 8.21.3`
+- `@types/ws 8.18.1`
 - `@types/node 24.13.4`
 - `tsx 4.23.13`
 - `typescript 7.0.2`
@@ -40,154 +39,160 @@ npm install
 npm run dev
 ```
 
-Then:
+Initial catalog/relation sync:
 
 ```bash
-curl http://localhost:3000/health
 curl -X POST http://localhost:3000/v1/sync
-curl 'http://localhost:3000/v1/markets?venue=polymarket'
-curl --get 'http://localhost:3000/v1/contracts' --data-urlencode 'marketId=polymarket:MARKET_ID'
-curl 'http://localhost:3000/v1/relations?type=IMPLIES'
-curl 'http://localhost:3000/v1/opportunities?minNetEdge=0.01'
-curl 'http://localhost:3000/v1/opportunities?targetShares=250&maxQuoteAgeMs=10000'
 ```
 
-## Pipeline
+Start live scanning:
+
+```bash
+curl -X POST http://localhost:3000/v1/live/start
+curl http://localhost:3000/v1/live/status
+```
+
+`POST /v1/live/start` performs an initial sync automatically if none exists.
+
+## Live architecture
 
 ```text
-Polymarket + Kalshi
-        ↓
-normalized markets
-        ↓
-title/subtitle candidate retrieval
-        ↓
-structured contract parsing
-        ↓
-settlement verification
-        ↓
-relation graph
-        ↓
-relation-relevant full-depth books + fee metadata
-        ↓
-VWAP + taker-fee execution simulator
-        ↓
-net executable opportunities
+catalog REST sync
+      ↓
+contract matcher + relation graph
+      ↓
+relation-relevant markets only
+      ↓
+┌───────────────────────┬────────────────────────┐
+│ Polymarket public WS  │ Kalshi authenticated WS│
+│ book + price_change   │ snapshot + delta       │
+└───────────┬───────────┴────────────┬───────────┘
+            ↓                        ↓
+        normalized in-memory books
+                    ↓
+        affected relation index only
+                    ↓
+      fee/depth-aware opportunity scan
+                    ↓
+          OPEN / UPDATE / CLOSE
+                    ↓
+      memory history + optional JSONL
 ```
 
-Long settlement rules are deliberately excluded from the first retrieval score. They are used later by the verifier, so verbose but semantically equivalent contracts are not discarded too early.
+A catalog sync does **not** run for every price update. Settlement relations are treated as static between catalog refreshes, while order-book changes trigger only the relations indexed by that market.
 
-## Relation semantics
+## Polymarket live feed
 
-### `EQUIVALENT`
+The service subscribes to the public CLOB market channel for the YES/NO asset IDs of Polymarket markets that participate in strong relations.
 
-No known contract differences and enough verification evidence to treat both contracts as equivalent.
+Behavior:
 
-### `SIMILAR`
+- full `book` messages replace the local side book;
+- `price_change` messages update one level in-place;
+- `PING` is sent every 10 seconds;
+- reconnects use bounded exponential backoff;
+- after reconnect, incremental deltas are ignored until a fresh full `book` is received for that token.
 
-The markets are related, but the verifier found a conflict or lacks enough evidence for a stronger relation. `SIMILAR` is never used by the opportunity engine.
+No Polymarket credentials are required for this market-data feed.
 
-### `THRESHOLD_NESTED`
+## Kalshi live feed
 
-Same underlying predicate and compatible settlement semantics, but one threshold is stricter than the other.
+Kalshi's orderbook WebSocket requires an authenticated handshake even for market-data subscriptions. Configure a read-only API key using either an inline PEM or a file path:
 
-### `TIME_NESTED`
-
-Same underlying predicate and compatible settlement semantics, but one deadline is earlier than the other.
-
-### `IMPLIES`
-
-Both threshold and/or time constraints establish a verified implication. Example:
-
-```text
-BTC > $160k by June 30  =>  BTC > $150k by December 31
+```bash
+export KALSHI_API_KEY_ID='...'
+export KALSHI_PRIVATE_KEY_PATH='/run/secrets/kalshi-read-key.pem'
 ```
 
-## Executable opportunity semantics
+or:
 
-For equivalent contracts, the engine evaluates both hedges:
-
-```text
-YES(A) + NO(B)
-NO(A)  + YES(B)
+```bash
+export KALSHI_API_KEY_ID='...'
+export KALSHI_PRIVATE_KEY_PEM='-----BEGIN PRIVATE KEY-----\n...'
 ```
 
-For a verified implication `A => B`, it evaluates:
+The private key is used only to create the RSA-PSS WebSocket handshake signature. It is never written to history or API responses.
 
-```text
-NO(A) + YES(B)
+The subscription explicitly requests `use_yes_price: true`; no-side levels are normalized back into NO-contract prices internally. Sequence gaps trigger a fresh orderbook snapshot request instead of continuing from a potentially corrupted local book.
+
+If credentials are absent, the service remains usable but reports Kalshi as:
+
+```json
+{
+  "status": "DEGRADED",
+  "reason": "kalshi_read_credentials_missing"
+}
 ```
 
-Every valid state of the world pays at least `$1` per paired share. Unlike `0.3.0`, `0.4.0` does not stop at best asks. It walks both books level by level, calculates per-leg VWAP and taker fees, and only returns a positive opportunity when the simulated net cost remains below the guaranteed payout.
+The most recent REST snapshot remains available; the API does not claim that Kalshi is live.
 
-Each result includes:
+## Opportunity history
 
-```text
-grossCostPerShare
-grossEdgePerShare
-maxExecutableShares
-maxProfitableShares
-bestExecution.shares
-bestExecution.totalFees
-bestExecution.netCost
-bestExecution.netProfit
-bestExecution.netEdgePerShare
-oldestQuoteAt
-quoteAgeMs
-isStale
+Every incremental market update compares the previous and new opportunity set for affected relations only.
+
+Events:
+
+- `OPEN`: a previously absent net opportunity appears;
+- `UPDATE`: a material execution metric changes;
+- `CLOSE`: a previous opportunity is no longer net-profitable/executable.
+
+Query recent in-memory history:
+
+```bash
+curl 'http://localhost:3000/v1/history?limit=100'
+curl --get 'http://localhost:3000/v1/history' --data-urlencode 'opportunityId=EQUIVALENT_ARB:...'
 ```
 
-When `targetShares` is supplied, the result also contains `targetExecution` and only survives if that exact size is executable and net profitable.
+The in-memory ring buffer keeps up to 10,000 events by default.
 
-## Fee model
+Optional append-only persistence:
 
-### Polymarket
-
-The service hydrates CLOB market info using the market `conditionId` and applies the venue taker curve:
-
-```text
-fee = contracts × feeRate × price × (1 - price)
+```bash
+export PRED_MATCHER_HISTORY_FILE='./.data/opportunity-history.jsonl'
 ```
 
-The fee rate is taken from current CLOB market metadata. Fee-free markets remain explicitly supported as zero-fee rather than being treated as unknown.
+Each line is one serialized history event. The file contains market/opportunity metrics only, never venue credentials.
 
-### Kalshi
+## Auto-start
 
-For standard quadratic event-contract fees:
+For a long-running service:
 
-```text
-fee = round_up(multiplier × 0.07 × contracts × price × (1 - price))
+```bash
+export PRED_MATCHER_LIVE_AUTO_START=true
+npm start
 ```
 
-The multiplier and fee type are resolved from event overrides and Series metadata. The current schedule rounds so `fee + positionCost` lands on a centicent.
-
-`flat` or otherwise unresolved Kalshi fee schedules are intentionally **fail-closed**: those markets are not promoted to net executable opportunities until their fee model is explicitly implemented.
-
-## Quote freshness
-
-Polymarket books use the CLOB snapshot timestamp. Kalshi's public orderbook response does not expose a snapshot timestamp, so the service records local capture time when the response is received.
-
-By default `/v1/opportunities` rejects books older than 15 seconds. Override with:
-
-```text
-maxQuoteAgeMs=5000
-includeStale=true
-```
-
-`includeStale=true` is intended for diagnostics, not execution decisions.
+The server performs an initial sync and then starts live subscriptions. A later `POST /v1/sync` rebuilds the relation graph and automatically restarts live subscriptions against the new relevant-market set.
 
 ## API
 
 ### `GET /health`
 
-Returns service version and the most recent sync summary.
+Returns service version, most recent sync summary, and live-scanner status.
 
 ### `POST /v1/sync`
 
-Fetches open markets, builds relations, and hydrates full-depth books plus fee metadata only for markets participating in strong relations.
+Refreshes open markets, contract relations, full-depth REST snapshots, and fee metadata. If live mode is running, subscriptions are restarted after the new relation graph is installed.
+
+### `POST /v1/live/start`
+
+Starts live market-data subscriptions. Performs an initial sync first when necessary.
+
+### `POST /v1/live/stop`
+
+Stops both venue streams.
+
+### `GET /v1/live/status`
+
+Returns per-venue connection state, subscription counts, reconnect count, latest message timestamp, and incremental recomputation counters.
+
+### `GET /v1/history?limit=100&opportunityId=...`
+
+Returns recent `OPEN` / `UPDATE` / `CLOSE` events, newest first.
 
 ### `GET /v1/markets?venue=polymarket|kalshi`
 
-Returns the normalized market snapshot, including hydrated books and fee metadata when available.
+Returns current normalized market state, including live-updated books when available.
 
 ### `GET /v1/contracts?marketId=...`
 
@@ -208,7 +213,7 @@ Supported query parameters:
 - `maxQuoteAgeMs=<milliseconds>`
 - `includeStale=true|false`
 
-The response reports `feesIncluded: true` and `depthIncluded: true`.
+The endpoint recomputes execution metrics from the current in-memory books, so caller-specific target size and freshness filters do not require a global rematch.
 
 ## Versioning
 
@@ -216,14 +221,14 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 
 - `0.1.0`: first runnable cross-venue matcher MVP.
 - `0.2.0`: structured contract parsing, verification, `SIMILAR`, and composed `IMPLIES` relations.
-- `0.3.0`: top-of-book hydration and gross equivalent/implication opportunity engine.
-- `0.4.0`: full-depth VWAP, venue taker fees, quote freshness, target-size simulation, and net executable opportunity estimates.
-- Backward-compatible features increment `MINOR` while pre-1.0.
-- Bug fixes increment `PATCH`.
-- After `1.0.0`, breaking API/schema changes increment `MAJOR`.
+- `0.3.0`: top-of-book hydration and gross opportunity engine.
+- `0.4.0`: full-depth VWAP, taker fees, freshness, target-size simulation, and net executable estimates.
+- `0.5.0`: live WebSocket market data, relation-indexed incremental recomputation, lifecycle history, and optional JSONL persistence.
+
+Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
 ## Important limitations
 
-`0.4.0` is materially closer to execution reality, but it is still a scanner, not an atomic trading system. It does not guarantee that both legs will fill simultaneously. Network latency, book changes between snapshot and order placement, partial fills, venue pauses/cancellations, account-specific fee discounts, capital/position limits, and settlement disputes can still destroy an apparent arbitrage.
+`0.5.0` is still a scanner, not an atomic two-venue execution engine. A live socket does not remove execution latency, partial-fill risk, capital/position constraints, venue pauses, account-specific fee discounts, or settlement disputes.
 
-The service therefore treats stale or fee-unknown data conservatively and should not be used as an unattended auto-trader without an execution/risk layer.
+Kalshi live mode also requires user-provided read credentials. Without them the system deliberately reports degraded status instead of treating a REST snapshot as live market data.

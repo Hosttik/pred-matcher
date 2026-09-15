@@ -2,11 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { buildContractSpec } from "./core/contract.js";
 import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
+import { LiveScanner } from "./service/live-scanner.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const store = new MemoryStore();
+const liveScanner = new LiveScanner(store);
 let activeSync: Promise<unknown> | undefined;
 
 function json(response: ServerResponse, status: number, body: unknown): void {
@@ -34,11 +36,29 @@ function positiveNumber(value: string | null): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+async function performSync(): Promise<unknown> {
+  if (activeSync) return activeSync;
+  const restartLive = liveScanner.getStatus().running;
+  activeSync = syncAll(store);
+  try {
+    const result = await activeSync;
+    if (restartLive) await liveScanner.restart();
+    return result;
+  } finally {
+    activeSync = undefined;
+  }
+}
+
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = urlFor(request);
 
   if (request.method === "GET" && url.pathname === "/health") {
-    json(response, 200, { status: "ok", version: VERSION, lastSync: store.getLastSync() ?? null });
+    json(response, 200, {
+      status: "ok",
+      version: VERSION,
+      lastSync: store.getLastSync() ?? null,
+      live: liveScanner.getStatus()
+    });
     return;
   }
 
@@ -47,12 +67,36 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       json(response, 409, { error: "sync_already_running" });
       return;
     }
-    activeSync = syncAll(store);
-    try {
-      json(response, 200, await activeSync);
-    } finally {
-      activeSync = undefined;
+    json(response, 200, await performSync());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/live/status") {
+    json(response, 200, liveScanner.getStatus());
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/live/start") {
+    if (!store.getLastSync()) await performSync();
+    json(response, 200, await liveScanner.start());
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/live/stop") {
+    json(response, 200, liveScanner.stop());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/history") {
+    const rawLimit = url.searchParams.get("limit");
+    const limit = rawLimit === null ? 100 : Number(rawLimit);
+    if (!Number.isFinite(limit) || limit < 1) {
+      json(response, 400, { error: "invalid_limit" });
+      return;
     }
+    const opportunityId = url.searchParams.get("opportunityId") ?? undefined;
+    const history = store.listHistory(limit, opportunityId);
+    json(response, 200, { count: history.length, history });
     return;
   }
 
@@ -123,6 +167,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       depthIncluded: true,
       staleQuotesIncluded: includeStale,
       targetShares: targetShares ?? null,
+      live: liveScanner.getStatus(),
       opportunities
     });
     return;
@@ -144,5 +189,10 @@ if (process.env.NODE_ENV !== "test") {
   const port = Number(process.env.PORT ?? 3000);
   createAppServer().listen(port, "0.0.0.0", () => {
     console.log(`pred-matcher v${VERSION} listening on :${port}`);
+    if (process.env.PRED_MATCHER_LIVE_AUTO_START === "true") {
+      void performSync()
+        .then(() => liveScanner.start())
+        .catch((error: unknown) => console.error("live auto-start failed", error));
+    }
   });
 }
