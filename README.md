@@ -1,26 +1,27 @@
 # pred-matcher
 
-Prediction-market relation and contract verification engine that ingests public Polymarket and Kalshi markets, normalizes their contract semantics, and detects structural relations across venues.
+Prediction-market relation, contract verification, and gross opportunity engine for Polymarket and Kalshi.
 
-Current version: **0.2.0**.
+Current version: **0.3.0**.
 
-## MVP scope
+## Scope
 
-- Polymarket public Gamma API ingestion.
-- Kalshi public Markets API ingestion.
+- Public Polymarket Gamma ingestion.
+- Public Kalshi Markets API ingestion.
 - Common normalized market model.
-- Title/subtitle candidate retrieval that avoids a naive full cross-product.
+- Indexed title/subtitle candidate retrieval without a naive full cross-product.
 - Structured contract parsing with field provenance (`venue`, `text`, `fallback`).
-- Settlement verification using resolution sources, rules similarity, and early-close conditions when available.
+- Settlement verification using resolution sources, rules similarity, thresholds, deadlines, comparator families, and early-close conditions when available.
 - Relations:
   - `EQUIVALENT`
   - `SIMILAR`
   - `THRESHOLD_NESTED`
   - `TIME_NESTED`
   - `IMPLIES`
-- In-memory API for syncing and inspecting markets, parsed contracts, and relations.
-
-The matcher remains deliberately deterministic and conservative. `SIMILAR` is used when two markets look related but the available contract evidence is not strong enough to claim equivalence or a safe implication.
+- Polymarket CLOB YES/NO top-of-book hydration for markets participating in strong relations.
+- Kalshi YES/NO top-of-book prices and sizes.
+- Gross opportunity detection for equivalent and implication relations.
+- In-memory HTTP API for markets, parsed contracts, relations, and opportunities.
 
 ## Requirements
 
@@ -49,7 +50,30 @@ curl -X POST http://localhost:3000/v1/sync
 curl 'http://localhost:3000/v1/markets?venue=polymarket'
 curl --get 'http://localhost:3000/v1/contracts' --data-urlencode 'marketId=polymarket:MARKET_ID'
 curl 'http://localhost:3000/v1/relations?type=IMPLIES'
+curl 'http://localhost:3000/v1/opportunities?minGrossEdge=0.01'
 ```
+
+## Matching pipeline
+
+```text
+Polymarket + Kalshi
+        ↓
+normalized markets
+        ↓
+title/subtitle candidate retrieval
+        ↓
+structured contract parsing
+        ↓
+settlement verification
+        ↓
+relation graph
+        ↓
+relation-relevant order books
+        ↓
+gross opportunity engine
+```
+
+Long settlement rules are deliberately excluded from the first retrieval score. They are used later by the verifier, so verbose but semantically equivalent contracts are not discarded too early.
 
 ## Contract model
 
@@ -72,7 +96,7 @@ A parsed contract can contain:
 }
 ```
 
-Venue-provided structured fields take precedence over text extraction. A market close time is treated as a fallback deadline and is explicitly marked as such.
+Venue-provided structured fields take precedence over text extraction. A technical market close time is treated only as a fallback deadline and is explicitly marked as such.
 
 ## Relation semantics
 
@@ -82,7 +106,7 @@ No known contract differences and enough verification evidence to treat both con
 
 ### `SIMILAR`
 
-The markets are semantically related, but the verifier found a conflict or lacks enough evidence for a stronger relation. For example, identical titles with incompatible resolution sources are `SIMILAR`, not `EQUIVALENT`.
+The markets are related, but the verifier found a conflict or lacks enough evidence for a stronger relation. `SIMILAR` is never used by the opportunity engine.
 
 ### `THRESHOLD_NESTED`
 
@@ -100,6 +124,50 @@ Both threshold and time constraints tighten in the same logical direction. Examp
 BTC > $160k by June 30  =>  BTC > $150k by December 31
 ```
 
+## Gross opportunity semantics
+
+`0.3.0` uses buyable **ask** prices rather than midpoint or last trade prices.
+
+For equivalent contracts, it checks both hedges:
+
+```text
+YES(A) + NO(B)
+NO(A)  + YES(B)
+```
+
+For a verified implication `A => B`, it checks:
+
+```text
+NO(A) + YES(B)
+```
+
+Every valid state of the world pays at least `$1` per paired share. A gross opportunity exists only when the combined asks cost less than `$1`.
+
+When both legs have top-of-book sizes, the service also reports:
+
+```text
+maxShares = min(size leg 1, size leg 2)
+grossProfitAtTop = grossEdgePerShare * maxShares
+```
+
+### Fees are not included yet
+
+This is deliberate. Kalshi fees are series-dependent, while Polymarket exposes market-specific fee configuration. `0.3.0` stores available fee metadata but does not yet apply venue fee formulas.
+
+Therefore every opportunity contains:
+
+```json
+{
+  "fees": {
+    "status": "NOT_INCLUDED"
+  }
+}
+```
+
+and the `/v1/opportunities` response includes `"feesIncluded": false`.
+
+A positive `grossEdgePerShare` is a **gross arbitrage candidate**, not a claim of positive net executable profit.
+
 ## API
 
 ### `GET /health`
@@ -108,19 +176,30 @@ Returns service version and the most recent sync summary.
 
 ### `POST /v1/sync`
 
-Fetches open markets from both venues, normalizes them, generates cross-venue candidates, parses contracts, verifies semantics, and classifies supported relations.
+Fetches open markets, matches contracts, verifies relations, hydrates Polymarket CLOB books only for markets in strong relations, and computes gross opportunities.
 
 ### `GET /v1/markets?venue=polymarket|kalshi`
 
-Returns the current in-memory market snapshot.
+Returns the current normalized market snapshot, including hydrated top-of-book fields when available.
 
 ### `GET /v1/contracts?marketId=...`
 
-Returns the structured contract representation for one market in the current snapshot.
+Returns the structured contract representation for one market.
 
 ### `GET /v1/relations?type=...`
 
-Returns detected relations, including contract comparison evidence. `type` is optional.
+Returns detected relations and verification evidence.
+
+### `GET /v1/opportunities?type=...&minGrossEdge=...`
+
+Returns positive gross opportunities sorted by gross edge per share.
+
+Supported `type` values:
+
+- `EQUIVALENT_ARB`
+- `IMPLICATION_ARB`
+
+`minGrossEdge` is expressed in dollars per paired share. For example, `0.02` means at least 2 cents of gross edge before fees.
 
 ## Versioning
 
@@ -128,10 +207,11 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 
 - `0.1.0`: first runnable cross-venue matcher MVP.
 - `0.2.0`: structured contract parsing, verification, `SIMILAR`, and composed `IMPLIES` relations.
+- `0.3.0`: top-of-book hydration and gross equivalent/implication opportunity engine.
 - Backward-compatible features increment `MINOR` while pre-1.0.
 - Bug fixes increment `PATCH`.
 - After `1.0.0`, breaking API/schema changes increment `MAJOR`.
 
 ## Important limitation
 
-A relation is **not** an executable arbitrage guarantee. Contract resolution rules, settlement sources, fees, bid/ask depth, liquidity, venue-specific cancellation behavior, and execution risk must be verified before a relation can be turned into a trading opportunity.
+A relation or gross opportunity is **not** yet an executable net arbitrage guarantee. Fees, full depth beyond the first price level, quote freshness, venue-specific cancellation/settlement behavior, latency, partial fills, and execution risk still need to be modeled before automated trading is justified.

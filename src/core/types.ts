@@ -1,11 +1,28 @@
 export type Venue = "polymarket" | "kalshi";
+export type OutcomeSide = "YES" | "NO";
 
 export interface MarketPrices {
   yesBid?: number;
   yesAsk?: number;
   noBid?: number;
   noAsk?: number;
+  yesBidSize?: number;
+  yesAskSize?: number;
+  noBidSize?: number;
+  noAskSize?: number;
   last?: number;
+}
+
+export interface MarketToken {
+  side: OutcomeSide;
+  tokenId: string;
+}
+
+export interface MarketFee {
+  enabled: boolean;
+  rate?: number;
+  exponent?: number;
+  takerOnly?: boolean;
 }
 
 export interface MarketStructure {
@@ -27,6 +44,8 @@ export interface NormalizedMarket {
   resolutionSource?: string;
   closeTime?: string;
   prices: MarketPrices;
+  tokens?: MarketToken[];
+  fee?: MarketFee;
   structure?: MarketStructure;
   sourceUrl?: string;
 }
@@ -87,10 +106,41 @@ export interface MarketRelation {
   comparison?: ContractComparison;
 }
 
+export type OpportunityType = "EQUIVALENT_ARB" | "IMPLICATION_ARB";
+
+export interface OpportunityLeg {
+  marketId: string;
+  venue: Venue;
+  side: OutcomeSide;
+  ask: number;
+  availableShares?: number;
+}
+
+export interface OpportunityFeeAssessment {
+  status: "NOT_INCLUDED";
+  reason: string;
+}
+
+export interface MarketOpportunity {
+  id: string;
+  type: OpportunityType;
+  relationType: RelationType;
+  relationConfidence: number;
+  legs: [OpportunityLeg, OpportunityLeg];
+  grossCostPerShare: number;
+  guaranteedPayoutPerShare: 1;
+  grossEdgePerShare: number;
+  grossEdgePercent: number;
+  maxShares?: number;
+  grossProfitAtTop?: number;
+  fees: OpportunityFeeAssessment;
+}
+
 export interface SyncResult {
   fetched: Record<Venue, number>;
   totalMarkets: number;
   candidatePairs: number;
   relations: number;
+  opportunities: number;
   syncedAt: string;
 }
