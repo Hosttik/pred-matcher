@@ -8,6 +8,7 @@ import type {
   SyncResult,
   Venue
 } from "../core/types.js";
+import type { PersistenceStatus, StatePersistence } from "./sqlite-state.js";
 
 function changed(previous: MarketOpportunity, next: MarketOpportunity): boolean {
   return Math.abs(previous.bestExecution.netEdgePerShare - next.bestExecution.netEdgePerShare) > 0.000001 ||
@@ -23,9 +24,22 @@ export class MemoryStore {
   private opportunities = new Map<string, MarketOpportunity>();
   private history: OpportunityHistoryEvent[] = [];
   private historySequence = 0;
-  private lastSync?: SyncResult;
+  private lastSync: SyncResult | undefined;
 
-  constructor(private readonly historyLimit = 10_000) {}
+  constructor(
+    private readonly historyLimit = 10_000,
+    private readonly persistence?: StatePersistence
+  ) {
+    if (!this.persistence) return;
+    const snapshot = this.persistence.load();
+    this.markets = new Map(snapshot.markets.map((market) => [market.id, market]));
+    this.relations = [...snapshot.relations];
+    this.opportunities = new Map(snapshot.opportunities.map((opportunity) => [opportunity.id, opportunity]));
+    this.history = snapshot.history.slice(-this.historyLimit);
+    this.historySequence = this.history.reduce((max, event) => Math.max(max, event.sequence), 0);
+    this.lastSync = snapshot.lastSync;
+    this.rebuildRelationIndex();
+  }
 
   replace(
     markets: NormalizedMarket[],
@@ -33,6 +47,7 @@ export class MemoryStore {
     opportunities: MarketOpportunity[],
     result: SyncResult
   ): void {
+    this.persistence?.replaceSnapshot(markets, relations, opportunities, result);
     this.markets = new Map(markets.map((market) => [market.id, market]));
     this.relations = [...relations];
     this.opportunities = new Map(opportunities.map((opportunity) => [opportunity.id, opportunity]));
@@ -87,7 +102,19 @@ export class MemoryStore {
     this.markets.set(market.id, market);
     const relations = this.relationIndex.get(market.id) ?? [];
     if (relations.length === 0) {
-      return { marketId: market.id, affectedRelations: 0, opportunities: [], history: [] };
+      let persistenceError: string | undefined;
+      try {
+        this.persistence?.applyIncremental(market, [], [], []);
+      } catch (error) {
+        persistenceError = error instanceof Error ? error.message : String(error);
+      }
+      return {
+        marketId: market.id,
+        affectedRelations: 0,
+        opportunities: [],
+        history: [],
+        ...(persistenceError ? { persistenceError } : {})
+      };
     }
 
     const previous = [...this.opportunities.values()].filter((opportunity) => {
@@ -116,11 +143,25 @@ export class MemoryStore {
     }
 
     this.appendHistory(history);
+
+    let persistenceError: string | undefined;
+    try {
+      this.persistence?.applyIncremental(
+        market,
+        previous.map((opportunity) => opportunity.id),
+        next,
+        history
+      );
+    } catch (error) {
+      persistenceError = error instanceof Error ? error.message : String(error);
+    }
+
     return {
       marketId: market.id,
       affectedRelations: relations.length,
       opportunities: next,
-      history
+      history,
+      ...(persistenceError ? { persistenceError } : {})
     };
   }
 
@@ -159,5 +200,23 @@ export class MemoryStore {
 
   getLastSync(): SyncResult | undefined {
     return this.lastSync;
+  }
+
+  getPersistenceStatus(): PersistenceStatus {
+    if (this.persistence) return this.persistence.status();
+    return {
+      enabled: false,
+      driver: "memory",
+      healthy: true,
+      schemaVersion: 0,
+      markets: this.markets.size,
+      relations: this.relations.length,
+      opportunities: this.opportunities.size,
+      historyEvents: this.history.length
+    };
+  }
+
+  close(): void {
+    this.persistence?.close();
   }
 }

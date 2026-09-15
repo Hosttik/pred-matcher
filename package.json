@@ -1,11 +1,11 @@
 {
   "name": "pred-matcher",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
-  "description": "Live prediction-market relation, verification, and executable opportunity scanner for Polymarket and Kalshi.",
+  "description": "Durable live prediction-market relation, verification, and executable opportunity scanner for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.15.0"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",

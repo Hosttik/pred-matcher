@@ -216,6 +216,7 @@ export interface LiveVenueState {
   venue: Venue;
   status: LiveConnectionStatus;
   subscribedMarkets: number;
+  connections?: number;
   lastMessageAt?: string;
   reconnects: number;
   error?: string;
@@ -235,6 +236,7 @@ export interface IncrementalUpdateResult {
   affectedRelations: number;
   opportunities: MarketOpportunity[];
   history: OpportunityHistoryEvent[];
+  persistenceError?: string;
 }
 
 export interface SyncResult {
