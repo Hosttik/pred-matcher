@@ -2,18 +2,68 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { buildContractSpec } from "./core/contract.js";
 import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
+import { CatalogRefresher } from "./service/catalog-refresh.js";
 import { LiveScanner } from "./service/live-scanner.js";
+import { renderPrometheusMetrics } from "./service/metrics.js";
+import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.5.0";
-const store = new MemoryStore();
+const VERSION = "0.6.0";
+const STARTED_AT_MS = Date.now();
+
+function configuredPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function createPersistence(): SqliteStateRepository | undefined {
+  if (process.env.PRED_MATCHER_PERSISTENCE === "false") return undefined;
+  const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
+  const path = process.env.PRED_MATCHER_DB_PATH?.trim() ||
+    (process.env.NODE_ENV === "test" ? ":memory:" : "./data/pred-matcher.sqlite");
+  return new SqliteStateRepository(path, historyLimit);
+}
+
+const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
+const store = new MemoryStore(historyLimit, createPersistence());
 const liveScanner = new LiveScanner(store);
 let activeSync: Promise<unknown> | undefined;
+
+async function performSync(): Promise<unknown> {
+  if (activeSync) return activeSync;
+  const restartLive = liveScanner.getStatus().running;
+  activeSync = syncAll(store);
+  try {
+    const result = await activeSync;
+    if (restartLive) await liveScanner.restart();
+    return result;
+  } finally {
+    activeSync = undefined;
+  }
+}
+
+const catalogRefreshMs = configuredPositiveInt("PRED_MATCHER_CATALOG_REFRESH_MS", 300_000);
+const catalogRefresher = new CatalogRefresher(
+  async () => {
+    if (activeSync) return false;
+    await performSync();
+    return true;
+  },
+  catalogRefreshMs,
+  process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false"
+);
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+function text(response: ServerResponse, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
+  response.writeHead(status, { "content-type": contentType });
+  response.end(body);
 }
 
 function urlFor(request: IncomingMessage): URL {
@@ -36,33 +86,64 @@ function positiveNumber(value: string | null): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-async function performSync(): Promise<unknown> {
-  if (activeSync) return activeSync;
-  const restartLive = liveScanner.getStatus().running;
-  activeSync = syncAll(store);
-  try {
-    const result = await activeSync;
-    if (restartLive) await liveScanner.restart();
-    return result;
-  } finally {
-    activeSync = undefined;
-  }
-}
-
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = urlFor(request);
 
   if (request.method === "GET" && url.pathname === "/health") {
-    json(response, 200, {
-      status: "ok",
+    const persistence = store.getPersistenceStatus();
+    json(response, persistence.healthy ? 200 : 503, {
+      status: persistence.healthy ? "ok" : "degraded",
       version: VERSION,
       lastSync: store.getLastSync() ?? null,
+      persistence,
+      catalog: catalogRefresher.getStatus(),
       live: liveScanner.getStatus()
     });
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/ready") {
+    const persistence = store.getPersistenceStatus();
+    const ready = Boolean(store.getLastSync()) && persistence.healthy;
+    json(response, ready ? 200 : 503, {
+      ready,
+      restoredOrSynced: Boolean(store.getLastSync()),
+      persistenceHealthy: persistence.healthy
+    });
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/metrics") {
+    text(
+      response,
+      200,
+      renderPrometheusMetrics(
+        VERSION,
+        store,
+        liveScanner.getStatus(),
+        catalogRefresher.getStatus(),
+        STARTED_AT_MS
+      ),
+      "text/plain; version=0.0.4; charset=utf-8"
+    );
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/v1/sync") {
+    if (activeSync) {
+      json(response, 409, { error: "sync_already_running" });
+      return;
+    }
+    json(response, 200, await performSync());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/catalog/status") {
+    json(response, 200, catalogRefresher.getStatus());
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/v1/catalog/refresh") {
     if (activeSync) {
       json(response, 409, { error: "sync_already_running" });
       return;
@@ -167,6 +248,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       depthIncluded: true,
       staleQuotesIncluded: includeStale,
       targetShares: targetShares ?? null,
+      persistence: store.getPersistenceStatus(),
       live: liveScanner.getStatus(),
       opportunities
     });
@@ -185,14 +267,37 @@ export function createAppServer() {
   });
 }
 
+async function initializeRuntime(): Promise<void> {
+  const autoLive = process.env.PRED_MATCHER_LIVE_AUTO_START === "true";
+  const autoCatalog = process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false";
+
+  if (!store.getLastSync() && (autoCatalog || autoLive)) await performSync();
+  if (autoLive && store.getLastSync()) await liveScanner.start();
+  if (autoCatalog) catalogRefresher.start(false);
+}
+
 if (process.env.NODE_ENV !== "test") {
   const port = Number(process.env.PORT ?? 3000);
-  createAppServer().listen(port, "0.0.0.0", () => {
+  const server = createAppServer();
+  let shuttingDown = false;
+
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    catalogRefresher.stop();
+    liveScanner.stop();
+    server.close(() => {
+      store.close();
+    });
+  };
+
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
+  server.listen(port, "0.0.0.0", () => {
     console.log(`pred-matcher v${VERSION} listening on :${port}`);
-    if (process.env.PRED_MATCHER_LIVE_AUTO_START === "true") {
-      void performSync()
-        .then(() => liveScanner.start())
-        .catch((error: unknown) => console.error("live auto-start failed", error));
-    }
+    void initializeRuntime().catch((error: unknown) => {
+      console.error("runtime initialization failed", error);
+    });
   });
 }
