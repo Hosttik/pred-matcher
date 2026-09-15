@@ -11,6 +11,10 @@ export class MemoryStore {
     this.lastSync = result;
   }
 
+  getMarket(id: string): NormalizedMarket | undefined {
+    return this.markets.get(id);
+  }
+
   listMarkets(venue?: Venue): NormalizedMarket[] {
     return [...this.markets.values()].filter((market) => !venue || market.venue === venue);
   }
