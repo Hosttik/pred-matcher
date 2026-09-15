@@ -34,11 +34,15 @@ function price(value?: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function finiteNumber(value?: number): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function structure(raw: KalshiMarketRaw): MarketStructure | undefined {
   const value: MarketStructure = {
     ...(raw.strike_type ? { strikeType: raw.strike_type } : {}),
-    ...(Number.isFinite(raw.floor_strike) ? { floorStrike: raw.floor_strike } : {}),
-    ...(Number.isFinite(raw.cap_strike) ? { capStrike: raw.cap_strike } : {}),
+    ...(finiteNumber(raw.floor_strike) ? { floorStrike: raw.floor_strike } : {}),
+    ...(finiteNumber(raw.cap_strike) ? { capStrike: raw.cap_strike } : {}),
     ...(raw.functional_strike ? { functionalStrike: raw.functional_strike } : {}),
     ...(raw.early_close_condition ? { earlyCloseCondition: raw.early_close_condition } : {})
   };
