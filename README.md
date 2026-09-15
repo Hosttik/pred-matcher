@@ -20,8 +20,8 @@ The current matcher is deliberately deterministic and conservative. It is a base
 
 ## Requirements
 
-- Node.js 22+
-- npm 10+
+- Node.js 24+
+- npm 11+
 
 ## Run
 
