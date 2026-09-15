@@ -1,8 +1,8 @@
 # pred-matcher
 
-Prediction-market relation, contract verification, and gross opportunity engine for Polymarket and Kalshi.
+Prediction-market relation, contract verification, and net executable opportunity engine for Polymarket and Kalshi.
 
-Current version: **0.3.0**.
+Current version: **0.4.0**.
 
 ## Scope
 
@@ -12,15 +12,13 @@ Current version: **0.3.0**.
 - Indexed title/subtitle candidate retrieval without a naive full cross-product.
 - Structured contract parsing with field provenance (`venue`, `text`, `fallback`).
 - Settlement verification using resolution sources, rules similarity, thresholds, deadlines, comparator families, and early-close conditions when available.
-- Relations:
-  - `EQUIVALENT`
-  - `SIMILAR`
-  - `THRESHOLD_NESTED`
-  - `TIME_NESTED`
-  - `IMPLIES`
-- Polymarket CLOB YES/NO top-of-book hydration for markets participating in strong relations.
-- Kalshi YES/NO top-of-book prices and sizes.
-- Gross opportunity detection for equivalent and implication relations.
+- Relations: `EQUIVALENT`, `SIMILAR`, `THRESHOLD_NESTED`, `TIME_NESTED`, `IMPLIES`.
+- Full-depth Polymarket CLOB YES/NO order books for markets participating in strong relations.
+- Full-depth Kalshi YES/NO books derived from public bid books.
+- Venue fee metadata and taker-fee calculation.
+- VWAP/slippage simulation for arbitrary target sizes.
+- Quote freshness checks and stale-snapshot filtering.
+- Maximum executable and maximum still-profitable size estimates.
 - In-memory HTTP API for markets, parsed contracts, relations, and opportunities.
 
 ## Requirements
@@ -50,10 +48,11 @@ curl -X POST http://localhost:3000/v1/sync
 curl 'http://localhost:3000/v1/markets?venue=polymarket'
 curl --get 'http://localhost:3000/v1/contracts' --data-urlencode 'marketId=polymarket:MARKET_ID'
 curl 'http://localhost:3000/v1/relations?type=IMPLIES'
-curl 'http://localhost:3000/v1/opportunities?minGrossEdge=0.01'
+curl 'http://localhost:3000/v1/opportunities?minNetEdge=0.01'
+curl 'http://localhost:3000/v1/opportunities?targetShares=250&maxQuoteAgeMs=10000'
 ```
 
-## Matching pipeline
+## Pipeline
 
 ```text
 Polymarket + Kalshi
@@ -68,35 +67,14 @@ settlement verification
         ↓
 relation graph
         ↓
-relation-relevant order books
+relation-relevant full-depth books + fee metadata
         ↓
-gross opportunity engine
+VWAP + taker-fee execution simulator
+        ↓
+net executable opportunities
 ```
 
 Long settlement rules are deliberately excluded from the first retrieval score. They are used later by the verifier, so verbose but semantically equivalent contracts are not discarded too early.
-
-## Contract model
-
-A parsed contract can contain:
-
-```json
-{
-  "subjectText": "above bitcoin",
-  "predicateText": "will bitcoin be above 150000 by december 31 2026",
-  "threshold": 150000,
-  "comparator": ">",
-  "deadline": "2026-12-31T23:59:59.000Z",
-  "resolutionSource": "coinbase.com",
-  "fieldSources": {
-    "threshold": "venue",
-    "comparator": "venue",
-    "deadline": "text",
-    "resolutionSource": "venue"
-  }
-}
-```
-
-Venue-provided structured fields take precedence over text extraction. A technical market close time is treated only as a fallback deadline and is explicitly marked as such.
 
 ## Relation semantics
 
@@ -118,55 +96,84 @@ Same underlying predicate and compatible settlement semantics, but one deadline 
 
 ### `IMPLIES`
 
-Both threshold and time constraints tighten in the same logical direction. Example:
+Both threshold and/or time constraints establish a verified implication. Example:
 
 ```text
 BTC > $160k by June 30  =>  BTC > $150k by December 31
 ```
 
-## Gross opportunity semantics
+## Executable opportunity semantics
 
-`0.3.0` uses buyable **ask** prices rather than midpoint or last trade prices.
-
-For equivalent contracts, it checks both hedges:
+For equivalent contracts, the engine evaluates both hedges:
 
 ```text
 YES(A) + NO(B)
 NO(A)  + YES(B)
 ```
 
-For a verified implication `A => B`, it checks:
+For a verified implication `A => B`, it evaluates:
 
 ```text
 NO(A) + YES(B)
 ```
 
-Every valid state of the world pays at least `$1` per paired share. A gross opportunity exists only when the combined asks cost less than `$1`.
+Every valid state of the world pays at least `$1` per paired share. Unlike `0.3.0`, `0.4.0` does not stop at best asks. It walks both books level by level, calculates per-leg VWAP and taker fees, and only returns a positive opportunity when the simulated net cost remains below the guaranteed payout.
 
-When both legs have top-of-book sizes, the service also reports:
+Each result includes:
 
 ```text
-maxShares = min(size leg 1, size leg 2)
-grossProfitAtTop = grossEdgePerShare * maxShares
+grossCostPerShare
+grossEdgePerShare
+maxExecutableShares
+maxProfitableShares
+bestExecution.shares
+bestExecution.totalFees
+bestExecution.netCost
+bestExecution.netProfit
+bestExecution.netEdgePerShare
+oldestQuoteAt
+quoteAgeMs
+isStale
 ```
 
-### Fees are not included yet
+When `targetShares` is supplied, the result also contains `targetExecution` and only survives if that exact size is executable and net profitable.
 
-This is deliberate. Kalshi fees are series-dependent, while Polymarket exposes market-specific fee configuration. `0.3.0` stores available fee metadata but does not yet apply venue fee formulas.
+## Fee model
 
-Therefore every opportunity contains:
+### Polymarket
 
-```json
-{
-  "fees": {
-    "status": "NOT_INCLUDED"
-  }
-}
+The service hydrates CLOB market info using the market `conditionId` and applies the venue taker curve:
+
+```text
+fee = contracts × feeRate × price × (1 - price)
 ```
 
-and the `/v1/opportunities` response includes `"feesIncluded": false`.
+The fee rate is taken from current CLOB market metadata. Fee-free markets remain explicitly supported as zero-fee rather than being treated as unknown.
 
-A positive `grossEdgePerShare` is a **gross arbitrage candidate**, not a claim of positive net executable profit.
+### Kalshi
+
+For standard quadratic event-contract fees:
+
+```text
+fee = round_up(multiplier × 0.07 × contracts × price × (1 - price))
+```
+
+The multiplier and fee type are resolved from event overrides and Series metadata. The current schedule rounds so `fee + positionCost` lands on a centicent.
+
+`flat` or otherwise unresolved Kalshi fee schedules are intentionally **fail-closed**: those markets are not promoted to net executable opportunities until their fee model is explicitly implemented.
+
+## Quote freshness
+
+Polymarket books use the CLOB snapshot timestamp. Kalshi's public orderbook response does not expose a snapshot timestamp, so the service records local capture time when the response is received.
+
+By default `/v1/opportunities` rejects books older than 15 seconds. Override with:
+
+```text
+maxQuoteAgeMs=5000
+includeStale=true
+```
+
+`includeStale=true` is intended for diagnostics, not execution decisions.
 
 ## API
 
@@ -176,11 +183,11 @@ Returns service version and the most recent sync summary.
 
 ### `POST /v1/sync`
 
-Fetches open markets, matches contracts, verifies relations, hydrates Polymarket CLOB books only for markets in strong relations, and computes gross opportunities.
+Fetches open markets, builds relations, and hydrates full-depth books plus fee metadata only for markets participating in strong relations.
 
 ### `GET /v1/markets?venue=polymarket|kalshi`
 
-Returns the current normalized market snapshot, including hydrated top-of-book fields when available.
+Returns the normalized market snapshot, including hydrated books and fee metadata when available.
 
 ### `GET /v1/contracts?marketId=...`
 
@@ -190,16 +197,18 @@ Returns the structured contract representation for one market.
 
 Returns detected relations and verification evidence.
 
-### `GET /v1/opportunities?type=...&minGrossEdge=...`
+### `GET /v1/opportunities`
 
-Returns positive gross opportunities sorted by gross edge per share.
+Supported query parameters:
 
-Supported `type` values:
+- `type=EQUIVALENT_ARB|IMPLICATION_ARB`
+- `minGrossEdge=<dollars-per-share>`
+- `minNetEdge=<dollars-per-share>`
+- `targetShares=<contracts>`
+- `maxQuoteAgeMs=<milliseconds>`
+- `includeStale=true|false`
 
-- `EQUIVALENT_ARB`
-- `IMPLICATION_ARB`
-
-`minGrossEdge` is expressed in dollars per paired share. For example, `0.02` means at least 2 cents of gross edge before fees.
+The response reports `feesIncluded: true` and `depthIncluded: true`.
 
 ## Versioning
 
@@ -208,10 +217,13 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.1.0`: first runnable cross-venue matcher MVP.
 - `0.2.0`: structured contract parsing, verification, `SIMILAR`, and composed `IMPLIES` relations.
 - `0.3.0`: top-of-book hydration and gross equivalent/implication opportunity engine.
+- `0.4.0`: full-depth VWAP, venue taker fees, quote freshness, target-size simulation, and net executable opportunity estimates.
 - Backward-compatible features increment `MINOR` while pre-1.0.
 - Bug fixes increment `PATCH`.
 - After `1.0.0`, breaking API/schema changes increment `MAJOR`.
 
-## Important limitation
+## Important limitations
 
-A relation or gross opportunity is **not** yet an executable net arbitrage guarantee. Fees, full depth beyond the first price level, quote freshness, venue-specific cancellation/settlement behavior, latency, partial fills, and execution risk still need to be modeled before automated trading is justified.
+`0.4.0` is materially closer to execution reality, but it is still a scanner, not an atomic trading system. It does not guarantee that both legs will fill simultaneously. Network latency, book changes between snapshot and order placement, partial fills, venue pauses/cancellations, account-specific fee discounts, capital/position limits, and settlement disputes can still destroy an apparent arbitrage.
+
+The service therefore treats stale or fee-unknown data conservatively and should not be used as an unattended auto-trader without an execution/risk layer.
