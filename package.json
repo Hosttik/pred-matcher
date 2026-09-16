@@ -1,8 +1,8 @@
 {
   "name": "pred-matcher",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
-  "description": "Durable live prediction-market matcher with semantic-verifier shadow mode, historical capture, calibration, regression gates, quality evaluation, settlement feedback, and replay for Polymarket and Kalshi.",
+  "description": "Durable live prediction-market matcher with semantic shadow A/B evaluation, historical capture, calibration, regression gates, quality evaluation, settlement feedback, and replay for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
     "node": ">=24.15.0"
@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "quality:sweep": "tsx src/cli/quality-sweep.ts",
     "quality:gate": "tsx src/cli/quality-gate.ts",
+    "shadow:backfill": "tsx src/cli/shadow-backfill.ts",
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
