@@ -239,7 +239,7 @@ export interface IncrementalUpdateResult {
   persistenceError?: string;
 }
 
-export type SemanticRolloutMode = "OFF" | "DRY_RUN" | "ENFORCED";
+export type SemanticRolloutMode = "OFF" | "DRY_RUN" | "AUTO" | "ENFORCED";
 
 export interface SemanticOpportunityImpact {
   baselineOpportunities: number;
@@ -262,6 +262,10 @@ export interface SemanticPolicySyncResult {
   requestedMode: Exclude<SemanticRolloutMode, "OFF">;
   effectiveMode: "DRY_RUN" | "ENFORCED";
   gateEligible: boolean;
+  safe: boolean;
+  safeStreak: number;
+  autoPromotionRequiredSyncs: number;
+  autoPromotedThisSync: boolean;
   matcherVersion: string;
   model?: string;
   promptVersion?: string;

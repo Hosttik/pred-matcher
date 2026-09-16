@@ -13,6 +13,7 @@ import { renderPrometheusMetrics } from "./service/metrics.js";
 import { PromotionGateService } from "./service/promotion-gate.js";
 import { handleQualityRequest } from "./service/quality-api.js";
 import { QualityRepository } from "./service/quality-repository.js";
+import { handleSemanticRolloutRequest } from "./service/semantic-rollout-api.js";
 import { SemanticVetoError, SemanticVetoService, type SemanticProductionMode } from "./service/semantic-veto.js";
 import { handleShadowRequest } from "./service/shadow-api.js";
 import { ShadowVerifierService } from "./service/shadow-verifier.js";
@@ -86,6 +87,7 @@ function createSemanticVerifier(): OpenAISemanticVerifier | undefined {
 function semanticMode(): SemanticProductionMode {
   const raw = process.env.PRED_MATCHER_SEMANTIC_MODE?.trim().toUpperCase();
   if (raw === "DRY_RUN") return "DRY_RUN";
+  if (raw === "AUTO") return "AUTO";
   if (raw === "ENFORCED" || raw === "VETO_ONLY") return "ENFORCED";
   return "OFF";
 }
@@ -113,7 +115,17 @@ const promotionGate = new PromotionGateService(qualityRepository, {
   minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8),
   confidenceZ: configuredPositive("PRED_MATCHER_PROMOTION_CONFIDENCE_Z", 1.96)
 });
-const restoredCircuit = store.getLastSync()?.semanticPolicy?.circuitBreaker;
+const restoredSemanticPolicy = store.getLastSync()?.semanticPolicy;
+const restoredCircuit = restoredSemanticPolicy?.circuitBreaker;
+const restoredPinsMatch = Boolean(
+  restoredSemanticPolicy &&
+  restoredSemanticPolicy.matcherVersion === MATCHER_VERSION &&
+  restoredSemanticPolicy.model === promotedModel &&
+  restoredSemanticPolicy.promptVersion === promotedPromptVersion
+);
+const restoredSafeStreak = restoredPinsMatch && Number.isInteger(restoredSemanticPolicy?.safeStreak)
+  ? restoredSemanticPolicy?.safeStreak ?? 0
+  : 0;
 const semanticVeto = new SemanticVetoService(semanticVerifier, promotionGate, {
   mode: semanticMode(),
   batchSize: configuredPositiveInt("PRED_MATCHER_VETO_BATCH_SIZE", 10),
@@ -121,6 +133,13 @@ const semanticVeto = new SemanticVetoService(semanticVerifier, promotionGate, {
   minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8),
   maximumVetoRate: configuredProbability("PRED_MATCHER_VETO_MAX_RATE", 0.35),
   minimumOpportunityRetentionRate: configuredProbability("PRED_MATCHER_VETO_MIN_OPPORTUNITY_RETENTION", 0.5),
+  autoPromotionRequiredSyncs: configuredPositiveInt("PRED_MATCHER_AUTO_PROMOTION_SAFE_SYNCS", 12),
+  initialSafeStreak: restoredSafeStreak,
+  initialAutoPromoted: Boolean(
+    restoredPinsMatch &&
+    restoredSemanticPolicy?.requestedMode === "AUTO" &&
+    restoredSemanticPolicy.effectiveMode === "ENFORCED"
+  ),
   ...(restoredCircuit ? {
     initialCircuit: {
       open: restoredCircuit.open,
@@ -148,7 +167,7 @@ let activeSync: Promise<unknown> | undefined;
 async function performSync(): Promise<unknown> {
   if (activeSync) return activeSync;
   const restartLive = liveScanner.getStatus().running;
-  activeSync = syncAll(store, semanticVeto);
+  activeSync = syncAll(store, semanticVeto, qualityRepository);
   try {
     const result = await activeSync;
     if (restartLive) await liveScanner.restart();
@@ -204,12 +223,11 @@ function positiveNumber(value: string | null): number | undefined {
 
 function semanticReady(): boolean {
   if (semanticVeto.mode === "OFF") return true;
-  const lastSync = store.getLastSync();
-  const policy = lastSync?.semanticPolicy;
+  const policy = store.getLastSync()?.semanticPolicy;
   if (!policy) return false;
   if (policy.requestedMode !== semanticVeto.mode) return false;
   if (policy.matcherVersion !== MATCHER_VERSION) return false;
-  if (semanticVeto.mode === "ENFORCED" && policy.effectiveMode === "ENFORCED") {
+  if (policy.effectiveMode === "ENFORCED") {
     return policy.model === promotedModel && policy.promptVersion === promotedPromptVersion;
   }
   return policy.effectiveMode === "DRY_RUN";
@@ -226,7 +244,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const baseHealthy = persistence.healthy && quality.healthy && dataset.healthy;
     const semanticDegraded = semantic.requestedMode !== "OFF" && (
       !semantic.configured || semantic.circuitBreaker.open ||
-      (semantic.requestedMode === "ENFORCED" && !semantic.promotionEligible)
+      ((semantic.requestedMode === "ENFORCED" || semantic.requestedMode === "AUTO") && !semantic.promotionEligible)
     );
     json(response, baseHealthy ? 200 : 503, {
       status: !baseHealthy ? "error" : semanticDegraded ? "degraded" : "ok",
@@ -287,18 +305,6 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "POST" && url.pathname === "/v1/catalog/refresh") {
     if (activeSync) { json(response, 409, { error: "sync_already_running" }); return; }
     json(response, 200, await performSync());
-    return;
-  }
-
-  if (request.method === "GET" && url.pathname === "/v1/semantic/status") {
-    json(response, 200, semanticVeto.getStatus());
-    return;
-  }
-  if (request.method === "POST" && url.pathname === "/v1/semantic/circuit/reset") {
-    json(response, 200, {
-      ...semanticVeto.resetCircuit(),
-      requiresSyncBeforeEnforcement: semanticVeto.mode === "ENFORCED"
-    });
     return;
   }
 
@@ -380,6 +386,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     return;
   }
 
+  if (await handleSemanticRolloutRequest(request, response, url, qualityRepository, semanticVeto)) return;
   if (await handleQualityRequest(request, response, url, store, qualityRepository)) return;
   if (await handleDatasetRequest(request, response, url, store, qualityRepository, datasetRepository, datasetCaptureScheduler)) return;
   if (await handleShadowRequest(request, response, url, shadowVerifier, qualityRepository, promotionGate)) return;

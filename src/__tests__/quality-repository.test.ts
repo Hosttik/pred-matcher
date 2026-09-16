@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { QualityRepository } from "../service/quality-repository.js";
 
 describe("QualityRepository", () => {
-  it("persists labels, settlements, and shadow observations across reopen", () => {
+  it("persists labels, settlements, shadow observations, and rollout evidence across reopen", () => {
     const dir = mkdtempSync(join(tmpdir(), "pred-matcher-quality-"));
     const path = join(dir, "quality.sqlite");
     try {
@@ -53,6 +53,47 @@ describe("QualityRepository", () => {
         heuristicConfidence: 0.9,
         heuristicDirection: "RIGHT_IMPLIES_LEFT"
       }]);
+      first.appendRolloutEvidence({
+        evidenceId: "ev-1",
+        syncedAt: "2026-01-04T00:00:00Z",
+        requestedMode: "AUTO",
+        effectiveMode: "DRY_RUN",
+        safe: true,
+        safeStreak: 2,
+        autoPromotedThisSync: false,
+        gateEligible: true,
+        matcherVersion: "heuristic-v1",
+        model: "fixture-model",
+        promptVersion: "semantic-contract-v1",
+        checkedRelations: 1,
+        confirmedRelations: 0,
+        vetoedRelations: 1,
+        vetoRate: 1,
+        opportunityImpact: {
+          baselineOpportunities: 1,
+          candidateOpportunities: 0,
+          suppressedOpportunities: 1,
+          introducedOpportunities: 0,
+          opportunityRetentionRate: 0,
+          suppressedNetProfit: 2,
+          maximumSuppressedNetEdgePerShare: 0.02
+        },
+        guardReasons: [],
+        circuitOpen: false
+      }, [{
+        evidenceId: "ev-1",
+        pairKey: "[\"a\",\"z\"]",
+        leftId: "a",
+        rightId: "z",
+        leftVenue: "kalshi",
+        rightVenue: "polymarket",
+        relationType: "IMPLIES",
+        direction: "RIGHT_IMPLIES_LEFT",
+        relationConfidence: 0.9,
+        action: "VETOED",
+        suppressedOpportunity: true,
+        capturedAt: "2026-01-04T00:00:00Z"
+      }]);
       first.close();
 
       const second = new QualityRepository(path);
@@ -66,13 +107,17 @@ describe("QualityRepository", () => {
       ]);
       expect(second.listShadowRuns()).toHaveLength(1);
       expect(second.listShadowVerifications({ runId: "run-1" })[0]?.type).toBe("IMPLIES");
+      expect(second.listRolloutEvidence()[0]?.safeStreak).toBe(2);
+      expect(second.listRolloutDecisions({ action: "VETOED" })[0]?.suppressedOpportunity).toBe(true);
       expect(second.status()).toMatchObject({
         healthy: true,
-        schemaVersion: 3,
+        schemaVersion: 4,
         shadowRuns: 1,
         shadowVerifications: 1,
         shadowExperiments: 0,
-        shadowReviewCandidates: 0
+        shadowReviewCandidates: 0,
+        rolloutEvidence: 1,
+        rolloutDecisions: 1
       });
       second.close();
     } finally {

@@ -111,14 +111,15 @@ function verifier(): SemanticVerifier {
   };
 }
 
-function options(mode: "DRY_RUN" | "ENFORCED", maximumVetoRate = 1, minimumOpportunityRetentionRate = 0): ConstructorParameters<typeof SemanticVetoService>[2] {
+function options(mode: "DRY_RUN" | "AUTO" | "ENFORCED", maximumVetoRate = 1, minimumOpportunityRetentionRate = 0): ConstructorParameters<typeof SemanticVetoService>[2] {
   return {
     mode,
     batchSize: 10,
     maximumRelations: 10,
     minimumSemanticConfidence: 0.8,
     maximumVetoRate,
-    minimumOpportunityRetentionRate
+    minimumOpportunityRetentionRate,
+    autoPromotionRequiredSyncs: 3
   };
 }
 
@@ -177,11 +178,29 @@ describe("SemanticVetoService", () => {
     expect(evaluation?.checkedRelations).toBe(2);
     expect(evaluation?.confirmedRelations).toBe(1);
     expect(evaluation?.vetoedRelations).toBe(1);
+    expect(evaluation?.decisions.map((decision) => decision.action)).toEqual(["CONFIRMED", "VETOED"]);
     expect(evaluation?.proposedRelations.map((relation) => relation.type)).toEqual(["EQUIVALENT", "SIMILAR"]);
     expect(evaluation?.proposedRelations.some((relation) => relation.leftId === "polymarket:p2")).toBe(false);
     const rollout = service.finalize(evaluation!, impact(0.5));
     expect(rollout.effectiveMode).toBe("DRY_RUN");
+    expect(rollout.safeStreak).toBe(1);
     expect(rollout.circuitBreaker.open).toBe(false);
+  });
+
+  it("auto-promotes only after the configured consecutive safe sync streak", async () => {
+    const { labels, observations } = dataset();
+    const promotion = evaluateSemanticPromotion(observations, labels, POLICY, 1, NOW_MS);
+    const service = new SemanticVetoService(verifier(), { evaluate: () => promotion }, options("AUTO"));
+    const { markets, relations } = relationFixtures();
+
+    for (let index = 1; index <= 3; index += 1) {
+      const evaluation = await service.evaluate(markets, relations);
+      const rollout = service.finalize(evaluation!, impact(0.5));
+      expect(rollout.safeStreak).toBe(index);
+      expect(rollout.effectiveMode).toBe(index < 3 ? "DRY_RUN" : "ENFORCED");
+      expect(rollout.autoPromotedThisSync).toBe(index === 3);
+    }
+    expect(service.getStatus().autoPromoted).toBe(true);
   });
 
   it("opens the circuit before calling the verifier when enforced promotion is ineligible", async () => {
@@ -220,11 +239,13 @@ describe("SemanticVetoService", () => {
     const rollout = service.finalize(evaluation!, impact(0.5));
 
     expect(rollout.effectiveMode).toBe("DRY_RUN");
+    expect(rollout.safeStreak).toBe(0);
     expect(rollout.circuitBreaker.open).toBe(true);
     expect(rollout.guardReasons.some((reason) => reason.startsWith("veto_rate_exceeded"))).toBe(true);
     expect(rollout.guardReasons.some((reason) => reason.startsWith("opportunity_retention_too_low"))).toBe(true);
 
     expect(service.resetCircuit().circuitBreaker.open).toBe(false);
+    expect(service.getStatus().safeStreak).toBe(0);
     expect(service.getStatus().effectiveMode).toBe("ENFORCED");
   });
 });

@@ -31,6 +31,10 @@ export function renderPrometheusMetrics(
   const kalshi = store.listMarkets("kalshi").length;
   const requestedMode = semantic?.requestedMode ?? "OFF";
   const effectiveMode = semantic?.effectiveMode ?? "OFF";
+  const safeStreak = semantic && Number.isFinite(semantic.safeStreak) ? semantic.safeStreak : 0;
+  const autoPromotionRequiredSyncs = semantic && Number.isFinite(semantic.autoPromotionRequiredSyncs) && semantic.autoPromotionRequiredSyncs > 0
+    ? semantic.autoPromotionRequiredSyncs
+    : 12;
   const lines = [
     "# HELP pred_matcher_info Build information.",
     "# TYPE pred_matcher_info gauge",
@@ -57,6 +61,15 @@ export function renderPrometheusMetrics(
     "# HELP pred_matcher_semantic_circuit_open Whether the semantic rollout circuit breaker is latched open.",
     "# TYPE pred_matcher_semantic_circuit_open gauge",
     `pred_matcher_semantic_circuit_open ${semantic?.circuitBreaker.open ? 1 : 0}`,
+    "# HELP pred_matcher_semantic_safe_streak Consecutive safe semantic rollout syncs.",
+    "# TYPE pred_matcher_semantic_safe_streak gauge",
+    `pred_matcher_semantic_safe_streak ${safeStreak}`,
+    "# HELP pred_matcher_semantic_auto_promotion_progress Fraction of required safe syncs completed for AUTO promotion.",
+    "# TYPE pred_matcher_semantic_auto_promotion_progress gauge",
+    `pred_matcher_semantic_auto_promotion_progress ${Math.min(1, safeStreak / autoPromotionRequiredSyncs)}`,
+    "# HELP pred_matcher_semantic_auto_promoted_this_sync Whether AUTO transitioned to ENFORCED in the last sync.",
+    "# TYPE pred_matcher_semantic_auto_promoted_this_sync gauge",
+    `pred_matcher_semantic_auto_promoted_this_sync ${semantic?.autoPromotedThisSync ? 1 : 0}`,
     "# HELP pred_matcher_semantic_veto_rate Fraction of checked arb relations proposed for veto in the last sync.",
     "# TYPE pred_matcher_semantic_veto_rate gauge",
     `pred_matcher_semantic_veto_rate ${semantic?.vetoRate ?? 0}`,
