@@ -2,10 +2,13 @@ import { randomUUID } from "node:crypto";
 import { classifyCandidate, generateCandidates } from "../core/matcher.js";
 import { evaluateMatcherQuality, relationPairKey } from "../core/quality.js";
 import {
+  emptySemanticVerifierUsage,
   heuristicSignature,
+  mergeSemanticVerifierUsage,
   semanticDecisionSignature,
   semanticDecisionToRelation,
   semanticPair,
+  verifySemanticBatch,
   type SemanticVerifier,
   type SemanticVerifierDecision,
   type ShadowRunRecord,
@@ -15,12 +18,7 @@ import type { MarketRelation, RelationType } from "../core/types.js";
 import type { QualityRepository } from "./quality-repository.js";
 import type { MemoryStore } from "./store.js";
 
-const ARB_ELIGIBLE = new Set<RelationType>([
-  "EQUIVALENT",
-  "THRESHOLD_NESTED",
-  "TIME_NESTED",
-  "IMPLIES"
-]);
+const ARB_ELIGIBLE = new Set<RelationType>(["EQUIVALENT", "THRESHOLD_NESTED", "TIME_NESTED", "IMPLIES"]);
 
 export interface ShadowVerifierOptions {
   enabled: boolean;
@@ -37,6 +35,7 @@ export interface ShadowVerifierStatus {
   running: boolean;
   provider?: string;
   model?: string;
+  promptVersion?: string;
   minimumCandidateScore: number;
   maxPairs: number;
   batchSize: number;
@@ -44,9 +43,7 @@ export interface ShadowVerifierStatus {
 }
 
 export class ShadowVerifierServiceError extends Error {
-  constructor(readonly status: number, readonly code: string) {
-    super(code);
-  }
+  constructor(readonly status: number, readonly code: string) { super(code); }
 }
 
 interface SelectedCandidate {
@@ -68,10 +65,6 @@ function clampProbability(value: number, fallback: number): number {
 
 function positiveInt(value: number, fallback: number, max: number): number {
   return Number.isInteger(value) && value > 0 ? Math.min(value, max) : fallback;
-}
-
-function relationForDecision(decision: SemanticVerifierDecision): MarketRelation | undefined {
-  return semanticDecisionToRelation(decision);
 }
 
 export class ShadowVerifierService {
@@ -104,7 +97,11 @@ export class ShadowVerifierService {
       configured: this.verifier !== undefined,
       autoRun: this.options.autoRun,
       running: this.active !== undefined,
-      ...(this.verifier ? { provider: this.verifier.provider, model: this.verifier.model } : {}),
+      ...(this.verifier ? {
+        provider: this.verifier.provider,
+        model: this.verifier.model,
+        ...(this.verifier.promptVersion ? { promptVersion: this.verifier.promptVersion } : {})
+      } : {}),
       minimumCandidateScore: this.options.minimumCandidateScore,
       maxPairs: this.options.maxPairs,
       batchSize: this.options.batchSize,
@@ -118,17 +115,12 @@ export class ShadowVerifierService {
     if (this.active) throw new ShadowVerifierServiceError(409, "shadow_run_in_progress");
     const task = this.execute(this.verifier);
     this.active = task;
-    try {
-      return await task;
-    } finally {
-      this.active = undefined;
-    }
+    try { return await task; } finally { this.active = undefined; }
   }
 
   private async execute(verifier: SemanticVerifier): Promise<ShadowRunRecord> {
     const markets = this.store.listMarkets();
     if (markets.length === 0) throw new ShadowVerifierServiceError(409, "shadow_verifier_no_markets");
-
     const retrieved = generateCandidates(markets, this.options.minimumCandidateScore);
     const selected = retrieved
       .map((candidate): SelectedCandidate => ({ candidate, heuristic: classifyCandidate(candidate) }))
@@ -136,18 +128,21 @@ export class ShadowVerifierService {
       .slice(0, this.options.maxPairs);
 
     const runId = randomUUID();
-    const startedAt = new Date().toISOString();
+    let usage = emptySemanticVerifierUsage();
     let record: ShadowRunRecord = {
       runId,
       status: "RUNNING",
       provider: verifier.provider,
       model: verifier.model,
-      startedAt,
+      ...(verifier.promptVersion ? { promptVersion: verifier.promptVersion } : {}),
+      source: "LIVE",
+      startedAt: new Date().toISOString(),
       retrievedPairs: retrieved.length,
       selectedPairs: selected.length,
       verifiedPairs: 0,
       labeledPairs: 0,
-      disagreements: 0
+      disagreements: 0,
+      usage
     };
     this.repository.upsertShadowRun(record);
 
@@ -156,19 +151,20 @@ export class ShadowVerifierService {
       for (let offset = 0; offset < selected.length; offset += this.options.batchSize) {
         const batch = selected.slice(offset, offset + this.options.batchSize);
         const requests = batch.map(({ candidate }) => semanticPair(candidate.left, candidate.right));
-        const batchDecisions = await verifier.verify(requests);
+        const result = await verifySemanticBatch(verifier, requests);
+        usage = mergeSemanticVerifierUsage(usage, result.usage);
         const heuristicByPair = new Map(batch.map(({ candidate, heuristic }) => [
-          relationPairKey(candidate.left.id, candidate.right.id),
-          heuristic
+          relationPairKey(candidate.left.id, candidate.right.id), heuristic
         ]));
         const observedAt = new Date().toISOString();
-        const observations: ShadowVerificationObservation[] = batchDecisions.map((decision) => {
+        const observations: ShadowVerificationObservation[] = result.decisions.map((decision) => {
           const heuristic = heuristicByPair.get(decision.pairKey);
           return {
             ...decision,
             runId,
             provider: verifier.provider,
             model: verifier.model,
+            ...(verifier.promptVersion ? { promptVersion: verifier.promptVersion } : {}),
             observedAt,
             heuristicType: heuristic?.type ?? null,
             heuristicConfidence: heuristic?.confidence ?? null,
@@ -176,8 +172,8 @@ export class ShadowVerifierService {
           };
         });
         this.repository.appendShadowVerifications(observations);
-        decisions.push(...batchDecisions);
-        record = { ...record, verifiedPairs: decisions.length };
+        decisions.push(...result.decisions);
+        record = { ...record, verifiedPairs: decisions.length, usage };
         this.repository.upsertShadowRun(record);
       }
 
@@ -185,12 +181,11 @@ export class ShadowVerifierService {
       const labels = this.repository.listLabels().filter((label) => selectedKeys.has(relationPairKey(label.leftId, label.rightId)));
       const heuristicPredictions = selected.flatMap(({ heuristic }) => heuristic ? [heuristic] : []);
       const shadowPredictions = decisions.flatMap((decision) => {
-        const relation = relationForDecision(decision);
+        const relation = semanticDecisionToRelation(decision);
         return relation ? [relation] : [];
       });
       const heuristicByPair = new Map(selected.map(({ candidate, heuristic }) => [
-        relationPairKey(candidate.left.id, candidate.right.id),
-        heuristic
+        relationPairKey(candidate.left.id, candidate.right.id), heuristic
       ]));
       const disagreements = decisions.filter((decision) => (
         semanticDecisionSignature(decision) !== heuristicSignature(heuristicByPair.get(decision.pairKey))
@@ -203,6 +198,7 @@ export class ShadowVerifierService {
         verifiedPairs: decisions.length,
         labeledPairs: labels.length,
         disagreements,
+        usage,
         heuristicReport: evaluateMatcherQuality(heuristicPredictions, labels),
         shadowReport: evaluateMatcherQuality(shadowPredictions, labels)
       };
@@ -215,6 +211,7 @@ export class ShadowVerifierService {
         status: "FAILED",
         completedAt: new Date().toISOString(),
         verifiedPairs: decisions.length,
+        usage,
         error: message.slice(0, 2_000)
       };
       this.repository.upsertShadowRun(record);
