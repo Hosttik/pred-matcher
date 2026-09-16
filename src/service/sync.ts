@@ -24,8 +24,8 @@ function opportunityMarketIds(relations: readonly MarketRelation[]): Set<string>
 }
 
 function suppressedOpportunityPairs(
-  baseline: readonly ReturnType<typeof findOpportunities>,
-  candidate: readonly ReturnType<typeof findOpportunities>
+  baseline: ReturnType<typeof findOpportunities>,
+  candidate: ReturnType<typeof findOpportunities>
 ): Set<string> {
   const candidateIds = new Set(candidate.map((opportunity) => opportunity.id));
   return new Set(baseline.filter((opportunity) => !candidateIds.has(opportunity.id)).map((opportunity) =>
