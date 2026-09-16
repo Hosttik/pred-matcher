@@ -54,6 +54,7 @@ export interface ShadowVerificationObservation extends SemanticVerifierDecision 
   provider: string;
   model: string;
   promptVersion?: string;
+  matcherVersion?: string;
   observedAt: string;
   heuristicType: RelationType | null;
   heuristicConfidence: number | null;
@@ -66,6 +67,7 @@ export interface ShadowRunRecord {
   provider: string;
   model: string;
   promptVersion?: string;
+  matcherVersion?: string;
   source?: ShadowRunSource;
   experimentId?: string;
   startedAt: string;
@@ -94,6 +96,7 @@ export interface ShadowExperimentRecord {
   experimentId: string;
   status: ShadowExperimentStatus;
   promptVersion: string;
+  matcherVersion?: string;
   source: "HISTORICAL";
   startedAt: string;
   completedAt?: string;

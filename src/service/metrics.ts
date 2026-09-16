@@ -26,8 +26,11 @@ export function renderPrometheusMetrics(
 ): string {
   const persistence = store.getPersistenceStatus();
   const lastSync = store.getLastSync();
+  const semantic = lastSync?.semanticPolicy;
   const polymarket = store.listMarkets("polymarket").length;
   const kalshi = store.listMarkets("kalshi").length;
+  const requestedMode = semantic?.requestedMode ?? "OFF";
+  const effectiveMode = semantic?.effectiveMode ?? "OFF";
   const lines = [
     "# HELP pred_matcher_info Build information.",
     "# TYPE pred_matcher_info gauge",
@@ -48,6 +51,21 @@ export function renderPrometheusMetrics(
     "# HELP pred_matcher_last_sync_timestamp_seconds Timestamp of the last catalog sync.",
     "# TYPE pred_matcher_last_sync_timestamp_seconds gauge",
     `pred_matcher_last_sync_timestamp_seconds ${timestampSeconds(lastSync?.syncedAt)}`,
+    "# HELP pred_matcher_semantic_policy Current requested/effective semantic rollout mode.",
+    "# TYPE pred_matcher_semantic_policy gauge",
+    `pred_matcher_semantic_policy{requested="${label(requestedMode)}",effective="${label(effectiveMode)}"} 1`,
+    "# HELP pred_matcher_semantic_circuit_open Whether the semantic rollout circuit breaker is latched open.",
+    "# TYPE pred_matcher_semantic_circuit_open gauge",
+    `pred_matcher_semantic_circuit_open ${semantic?.circuitBreaker.open ? 1 : 0}`,
+    "# HELP pred_matcher_semantic_veto_rate Fraction of checked arb relations proposed for veto in the last sync.",
+    "# TYPE pred_matcher_semantic_veto_rate gauge",
+    `pred_matcher_semantic_veto_rate ${semantic?.vetoRate ?? 0}`,
+    "# HELP pred_matcher_semantic_opportunity_retention Fraction of baseline opportunities retained by semantic policy.",
+    "# TYPE pred_matcher_semantic_opportunity_retention gauge",
+    `pred_matcher_semantic_opportunity_retention ${semantic?.opportunityImpact.opportunityRetentionRate ?? 1}`,
+    "# HELP pred_matcher_semantic_suppressed_opportunities Opportunities removed by the semantic candidate policy in the last sync.",
+    "# TYPE pred_matcher_semantic_suppressed_opportunities gauge",
+    `pred_matcher_semantic_suppressed_opportunities ${semantic?.opportunityImpact.suppressedOpportunities ?? 0}`,
     "# HELP pred_matcher_persistence_enabled Durable persistence is configured.",
     "# TYPE pred_matcher_persistence_enabled gauge",
     `pred_matcher_persistence_enabled ${persistence.enabled ? 1 : 0}`,

@@ -15,6 +15,7 @@ import {
   type ShadowVerificationObservation
 } from "../core/semantic-verifier.js";
 import type { MarketRelation, RelationType } from "../core/types.js";
+import { MATCHER_VERSION } from "../core/version.js";
 import type { QualityRepository } from "./quality-repository.js";
 import type { MemoryStore } from "./store.js";
 
@@ -36,6 +37,7 @@ export interface ShadowVerifierStatus {
   provider?: string;
   model?: string;
   promptVersion?: string;
+  matcherVersion: string;
   minimumCandidateScore: number;
   maxPairs: number;
   batchSize: number;
@@ -102,6 +104,7 @@ export class ShadowVerifierService {
         model: this.verifier.model,
         ...(this.verifier.promptVersion ? { promptVersion: this.verifier.promptVersion } : {})
       } : {}),
+      matcherVersion: MATCHER_VERSION,
       minimumCandidateScore: this.options.minimumCandidateScore,
       maxPairs: this.options.maxPairs,
       batchSize: this.options.batchSize,
@@ -135,6 +138,7 @@ export class ShadowVerifierService {
       provider: verifier.provider,
       model: verifier.model,
       ...(verifier.promptVersion ? { promptVersion: verifier.promptVersion } : {}),
+      matcherVersion: MATCHER_VERSION,
       source: "LIVE",
       startedAt: new Date().toISOString(),
       retrievedPairs: retrieved.length,
@@ -165,6 +169,7 @@ export class ShadowVerifierService {
             provider: verifier.provider,
             model: verifier.model,
             ...(verifier.promptVersion ? { promptVersion: verifier.promptVersion } : {}),
+            matcherVersion: MATCHER_VERSION,
             observedAt,
             heuristicType: heuristic?.type ?? null,
             heuristicConfidence: heuristic?.confidence ?? null,

@@ -239,16 +239,44 @@ export interface IncrementalUpdateResult {
   persistenceError?: string;
 }
 
+export type SemanticRolloutMode = "OFF" | "DRY_RUN" | "ENFORCED";
+
+export interface SemanticOpportunityImpact {
+  baselineOpportunities: number;
+  candidateOpportunities: number;
+  suppressedOpportunities: number;
+  introducedOpportunities: number;
+  opportunityRetentionRate: number | null;
+  suppressedNetProfit: number;
+  maximumSuppressedNetEdgePerShare: number | null;
+}
+
+export interface SemanticCircuitBreakerState {
+  open: boolean;
+  trippedThisSync: boolean;
+  reasons: string[];
+  openedAt?: string;
+}
+
 export interface SemanticPolicySyncResult {
-  mode: "VETO_ONLY";
-  gateEligible: true;
-  model: string;
-  promptVersion: string;
+  requestedMode: Exclude<SemanticRolloutMode, "OFF">;
+  effectiveMode: "DRY_RUN" | "ENFORCED";
+  gateEligible: boolean;
+  matcherVersion: string;
+  model?: string;
+  promptVersion?: string;
+  promotionEvaluatedAt: string;
+  promotionNewestEvidenceAt: string | null;
   checkedRelations: number;
   vetoedRelations: number;
   confirmedRelations: number;
+  vetoRate: number;
+  opportunityImpact: SemanticOpportunityImpact;
+  guardReasons: string[];
+  circuitBreaker: SemanticCircuitBreakerState;
   requests: number;
   estimatedCostUsd: number | null;
+  providerError?: string;
 }
 
 export interface SyncResult {

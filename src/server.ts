@@ -3,6 +3,7 @@ import { OpenAISemanticVerifier } from "./adapters/openai-semantic-verifier.js";
 import { buildContractSpec } from "./core/contract.js";
 import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
+import { APP_VERSION, MATCHER_VERSION } from "./core/version.js";
 import { CatalogRefresher } from "./service/catalog-refresh.js";
 import { DatasetCaptureScheduler } from "./service/dataset-capture.js";
 import { handleDatasetRequest } from "./service/dataset-api.js";
@@ -19,9 +20,8 @@ import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.12.0";
+const VERSION = APP_VERSION;
 const STARTED_AT_MS = Date.now();
-const PROMPT_VERSION = "semantic-contract-v1";
 
 function configuredPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -84,7 +84,10 @@ function createSemanticVerifier(): OpenAISemanticVerifier | undefined {
 }
 
 function semanticMode(): SemanticProductionMode {
-  return process.env.PRED_MATCHER_SEMANTIC_MODE === "VETO_ONLY" ? "VETO_ONLY" : "OFF";
+  const raw = process.env.PRED_MATCHER_SEMANTIC_MODE?.trim().toUpperCase();
+  if (raw === "DRY_RUN") return "DRY_RUN";
+  if (raw === "ENFORCED" || raw === "VETO_ONLY") return "ENFORCED";
+  return "OFF";
 }
 
 const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
@@ -95,9 +98,12 @@ const liveScanner = new LiveScanner(store);
 const semanticVerifier = createSemanticVerifier();
 const promotedModel = process.env.PRED_MATCHER_PROMOTED_MODEL?.trim() || "__UNPINNED_MODEL__";
 const promotedPromptVersion = process.env.PRED_MATCHER_PROMOTED_PROMPT_VERSION?.trim() || "__UNPINNED_PROMPT__";
+const promotedMatcherVersion = process.env.PRED_MATCHER_PROMOTED_MATCHER_VERSION?.trim() || "__UNPINNED_MATCHER__";
 const promotionGate = new PromotionGateService(qualityRepository, {
   model: promotedModel,
   promptVersion: promotedPromptVersion,
+  matcherVersion: promotedMatcherVersion,
+  maximumEvidenceAgeMs: configuredPositiveInt("PRED_MATCHER_PROMOTION_MAX_EVIDENCE_AGE_MS", 7 * 24 * 60 * 60 * 1000),
   minimumLabeledPairs: configuredPositiveInt("PRED_MATCHER_PROMOTION_MIN_LABELED_PAIRS", 100),
   minimumRetainedArbPredictions: configuredPositiveInt("PRED_MATCHER_PROMOTION_MIN_ARB_PREDICTIONS", 75),
   maximumFalseArbRateUpperBound: configuredProbability("PRED_MATCHER_PROMOTION_MAX_FALSE_ARB_UCB", 0.05),
@@ -107,11 +113,21 @@ const promotionGate = new PromotionGateService(qualityRepository, {
   minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8),
   confidenceZ: configuredPositive("PRED_MATCHER_PROMOTION_CONFIDENCE_Z", 1.96)
 });
+const restoredCircuit = store.getLastSync()?.semanticPolicy?.circuitBreaker;
 const semanticVeto = new SemanticVetoService(semanticVerifier, promotionGate, {
   mode: semanticMode(),
   batchSize: configuredPositiveInt("PRED_MATCHER_VETO_BATCH_SIZE", 10),
   maximumRelations: configuredPositiveInt("PRED_MATCHER_VETO_MAX_RELATIONS", 500),
-  minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8)
+  minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8),
+  maximumVetoRate: configuredProbability("PRED_MATCHER_VETO_MAX_RATE", 0.35),
+  minimumOpportunityRetentionRate: configuredProbability("PRED_MATCHER_VETO_MIN_OPPORTUNITY_RETENTION", 0.5),
+  ...(restoredCircuit ? {
+    initialCircuit: {
+      open: restoredCircuit.open,
+      reasons: restoredCircuit.reasons,
+      ...(restoredCircuit.openedAt ? { openedAt: restoredCircuit.openedAt } : {})
+    }
+  } : {})
 });
 const shadowVerifier = new ShadowVerifierService(store, qualityRepository, semanticVerifier, {
   enabled: process.env.PRED_MATCHER_SHADOW_ENABLED === "true",
@@ -187,13 +203,16 @@ function positiveNumber(value: string | null): number | undefined {
 }
 
 function semanticReady(): boolean {
-  if (semanticVeto.mode !== "VETO_ONLY") return true;
-  const status = semanticVeto.getStatus();
+  if (semanticVeto.mode === "OFF") return true;
   const lastSync = store.getLastSync();
-  return status.configured && status.promotionEligible &&
-    lastSync?.semanticPolicy?.mode === "VETO_ONLY" &&
-    lastSync.semanticPolicy.model === promotedModel &&
-    lastSync.semanticPolicy.promptVersion === promotedPromptVersion;
+  const policy = lastSync?.semanticPolicy;
+  if (!policy) return false;
+  if (policy.requestedMode !== semanticVeto.mode) return false;
+  if (policy.matcherVersion !== MATCHER_VERSION) return false;
+  if (semanticVeto.mode === "ENFORCED" && policy.effectiveMode === "ENFORCED") {
+    return policy.model === promotedModel && policy.promptVersion === promotedPromptVersion;
+  }
+  return policy.effectiveMode === "DRY_RUN";
 }
 
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -204,11 +223,15 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const quality = qualityRepository.status();
     const dataset = datasetRepository.status();
     const semantic = semanticVeto.getStatus();
-    const semanticHealthy = semantic.mode !== "VETO_ONLY" || (semantic.configured && semantic.promotionEligible);
-    const healthy = persistence.healthy && quality.healthy && dataset.healthy && semanticHealthy;
-    json(response, healthy ? 200 : 503, {
-      status: healthy ? "ok" : "degraded",
+    const baseHealthy = persistence.healthy && quality.healthy && dataset.healthy;
+    const semanticDegraded = semantic.requestedMode !== "OFF" && (
+      !semantic.configured || semantic.circuitBreaker.open ||
+      (semantic.requestedMode === "ENFORCED" && !semantic.promotionEligible)
+    );
+    json(response, baseHealthy ? 200 : 503, {
+      status: !baseHealthy ? "error" : semanticDegraded ? "degraded" : "ok",
       version: VERSION,
+      matcherVersion: MATCHER_VERSION,
       lastSync: store.getLastSync() ?? null,
       persistence,
       quality,
@@ -264,6 +287,18 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "POST" && url.pathname === "/v1/catalog/refresh") {
     if (activeSync) { json(response, 409, { error: "sync_already_running" }); return; }
     json(response, 200, await performSync());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/semantic/status") {
+    json(response, 200, semanticVeto.getStatus());
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/semantic/circuit/reset") {
+    json(response, 200, {
+      ...semanticVeto.resetCircuit(),
+      requiresSyncBeforeEnforcement: semanticVeto.mode === "ENFORCED"
+    });
     return;
   }
 
@@ -369,11 +404,11 @@ async function initializeRuntime(): Promise<void> {
   const autoCatalog = process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false";
   const autoDataset = process.env.PRED_MATCHER_DATASET_AUTO_CAPTURE !== "false";
   const autoShadow = shadowVerifier.shouldAutoRun();
-  const requiresVetoRefresh = semanticVeto.mode === "VETO_ONLY" && !semanticReady();
+  const requiresSemanticRefresh = semanticVeto.mode !== "OFF" && !semanticReady();
   let synced = false;
 
   if (autoCatalog) catalogRefresher.start(false);
-  if ((!store.getLastSync() && (autoCatalog || autoLive || autoDataset || autoShadow)) || requiresVetoRefresh) {
+  if ((!store.getLastSync() && (autoCatalog || autoLive || autoDataset || autoShadow)) || requiresSemanticRefresh) {
     await performSync();
     synced = true;
   }

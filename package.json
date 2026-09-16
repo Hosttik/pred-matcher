@@ -1,8 +1,8 @@
 {
   "name": "pred-matcher",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
-  "description": "Durable live prediction-market matcher with promoted semantic veto policy, shadow A/B evaluation, historical capture, calibration, regression gates, quality evaluation, settlement feedback, and replay for Polymarket and Kalshi.",
+  "description": "Durable live prediction-market matcher with controlled semantic veto rollout, circuit breaking, shadow A/B evaluation, historical capture, calibration, regression gates, quality evaluation, settlement feedback, and replay for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
     "node": ">=24.15.0"

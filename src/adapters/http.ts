@@ -1,4 +1,6 @@
-const USER_AGENT = "pred-matcher/0.3.0";
+import { APP_VERSION } from "../core/version.js";
+
+const USER_AGENT = `pred-matcher/${APP_VERSION}`;
 
 async function requestJson<T>(url: URL, init: RequestInit, timeoutMs: number): Promise<T> {
   const controller = new AbortController();

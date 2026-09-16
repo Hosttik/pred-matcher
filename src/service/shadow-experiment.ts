@@ -18,6 +18,7 @@ import {
   type ShadowVerificationObservation
 } from "../core/semantic-verifier.js";
 import type { MarketRelation, RelationType } from "../core/types.js";
+import { MATCHER_VERSION } from "../core/version.js";
 import type { DatasetRepository } from "./dataset-repository.js";
 import type { QualityRepository } from "./quality-repository.js";
 
@@ -170,6 +171,7 @@ export class ShadowExperimentRunner {
       experimentId,
       status: "RUNNING",
       promptVersion: promptVersions.join(","),
+      matcherVersion: MATCHER_VERSION,
       source: "HISTORICAL",
       startedAt: new Date().toISOString(),
       snapshots: snapshots.length,
@@ -202,6 +204,7 @@ export class ShadowExperimentRunner {
         provider: verifier.provider,
         model: verifier.model,
         ...(verifier.promptVersion ? { promptVersion: verifier.promptVersion } : {}),
+        matcherVersion: MATCHER_VERSION,
         source: "HISTORICAL",
         experimentId,
         startedAt: new Date().toISOString(),
@@ -230,6 +233,7 @@ export class ShadowExperimentRunner {
               provider: verifier.provider,
               model: verifier.model,
               ...(verifier.promptVersion ? { promptVersion: verifier.promptVersion } : {}),
+              matcherVersion: MATCHER_VERSION,
               observedAt,
               heuristicType: heuristic?.type ?? null,
               heuristicConfidence: heuristic?.confidence ?? null,
