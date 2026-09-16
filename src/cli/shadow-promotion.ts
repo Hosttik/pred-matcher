@@ -1,3 +1,4 @@
+import { MATCHER_VERSION } from "../core/version.js";
 import { PromotionGateService } from "../service/promotion-gate.js";
 import { QualityRepository } from "../service/quality-repository.js";
 
@@ -23,8 +24,12 @@ function positive(name: string, fallback: number): number {
 
 const model = process.env.PRED_MATCHER_PROMOTED_MODEL?.trim();
 const promptVersion = process.env.PRED_MATCHER_PROMOTED_PROMPT_VERSION?.trim();
-if (!model || !promptVersion) {
-  console.error("PRED_MATCHER_PROMOTED_MODEL and PRED_MATCHER_PROMOTED_PROMPT_VERSION are required");
+const matcherVersion = process.env.PRED_MATCHER_PROMOTED_MATCHER_VERSION?.trim();
+if (!model || !promptVersion || !matcherVersion) {
+  console.error("PRED_MATCHER_PROMOTED_MODEL, PRED_MATCHER_PROMOTED_PROMPT_VERSION, and PRED_MATCHER_PROMOTED_MATCHER_VERSION are required");
+  process.exitCode = 2;
+} else if (matcherVersion !== MATCHER_VERSION) {
+  console.error(`Promoted matcher pin ${matcherVersion} does not match current matcher ${MATCHER_VERSION}`);
   process.exitCode = 2;
 } else {
   const path = process.env.PRED_MATCHER_QUALITY_DB_PATH?.trim() || "./data/pred-matcher-quality.sqlite";
@@ -33,6 +38,8 @@ if (!model || !promptVersion) {
     const gate = new PromotionGateService(repository, {
       model,
       promptVersion,
+      matcherVersion,
+      maximumEvidenceAgeMs: positiveInt("PRED_MATCHER_PROMOTION_MAX_EVIDENCE_AGE_MS", 7 * 24 * 60 * 60 * 1000),
       minimumLabeledPairs: positiveInt("PRED_MATCHER_PROMOTION_MIN_LABELED_PAIRS", 100),
       minimumRetainedArbPredictions: positiveInt("PRED_MATCHER_PROMOTION_MIN_ARB_PREDICTIONS", 75),
       maximumFalseArbRateUpperBound: probability("PRED_MATCHER_PROMOTION_MAX_FALSE_ARB_UCB", 0.05),
