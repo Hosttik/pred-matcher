@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { OpenAISemanticVerifier } from "./adapters/openai-semantic-verifier.js";
 import { buildContractSpec } from "./core/contract.js";
 import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
@@ -10,11 +11,13 @@ import { LiveScanner } from "./service/live-scanner.js";
 import { renderPrometheusMetrics } from "./service/metrics.js";
 import { handleQualityRequest } from "./service/quality-api.js";
 import { QualityRepository } from "./service/quality-repository.js";
+import { handleShadowRequest } from "./service/shadow-api.js";
+import { ShadowVerifierService } from "./service/shadow-verifier.js";
 import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.9.0";
+const VERSION = "0.10.0";
 const STARTED_AT_MS = Date.now();
 
 function configuredPositiveInt(name: string, fallback: number): number {
@@ -22,6 +25,13 @@ function configuredPositiveInt(name: string, fallback: number): number {
   if (!raw) return fallback;
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function configuredProbability(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : fallback;
 }
 
 function createPersistence(): SqliteStateRepository | undefined {
@@ -45,11 +55,29 @@ function createDatasetRepository(): DatasetRepository {
   return new DatasetRepository(path, maxSnapshots);
 }
 
+function createSemanticVerifier(): OpenAISemanticVerifier | undefined {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  return new OpenAISemanticVerifier({
+    apiKey,
+    model: process.env.PRED_MATCHER_SHADOW_MODEL?.trim() || "gpt-5.6-luna",
+    baseUrl: "https://api.openai.com/v1",
+    timeoutMs: configuredPositiveInt("PRED_MATCHER_SHADOW_TIMEOUT_MS", 45_000)
+  });
+}
+
 const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
 const store = new MemoryStore(historyLimit, createPersistence());
 const qualityRepository = createQualityRepository();
 const datasetRepository = createDatasetRepository();
 const liveScanner = new LiveScanner(store);
+const shadowVerifier = new ShadowVerifierService(store, qualityRepository, createSemanticVerifier(), {
+  enabled: process.env.PRED_MATCHER_SHADOW_ENABLED === "true",
+  autoRun: process.env.PRED_MATCHER_SHADOW_AUTO_RUN === "true",
+  minimumCandidateScore: configuredProbability("PRED_MATCHER_SHADOW_MIN_CANDIDATE_SCORE", 0.2),
+  maxPairs: configuredPositiveInt("PRED_MATCHER_SHADOW_MAX_PAIRS", 50),
+  batchSize: configuredPositiveInt("PRED_MATCHER_SHADOW_BATCH_SIZE", 10)
+});
 const datasetCaptureMs = configuredPositiveInt("PRED_MATCHER_DATASET_CAPTURE_MS", 300_000);
 const datasetCaptureScheduler = new DatasetCaptureScheduler(
   store,
@@ -66,6 +94,13 @@ async function performSync(): Promise<unknown> {
   try {
     const result = await activeSync;
     if (restartLive) await liveScanner.restart();
+    if (shadowVerifier.shouldAutoRun()) {
+      try {
+        await shadowVerifier.run();
+      } catch (error) {
+        console.error("shadow verification failed", error);
+      }
+    }
     return result;
   } finally {
     activeSync = undefined;
@@ -130,7 +165,8 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       dataset,
       datasetCapture: datasetCaptureScheduler.getStatus(),
       catalog: catalogRefresher.getStatus(),
-      live: liveScanner.getStatus()
+      live: liveScanner.getStatus(),
+      shadow: shadowVerifier.getStatus()
     });
     return;
   }
@@ -151,18 +187,13 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
 
   if (request.method === "GET" && url.pathname === "/metrics") {
-    text(
-      response,
-      200,
-      renderPrometheusMetrics(
-        VERSION,
-        store,
-        liveScanner.getStatus(),
-        catalogRefresher.getStatus(),
-        STARTED_AT_MS
-      ),
-      "text/plain; version=0.0.4; charset=utf-8"
-    );
+    text(response, 200, renderPrometheusMetrics(
+      VERSION,
+      store,
+      liveScanner.getStatus(),
+      catalogRefresher.getStatus(),
+      STARTED_AT_MS
+    ), "text/plain; version=0.0.4; charset=utf-8");
     return;
   }
 
@@ -255,7 +286,6 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       json(response, 400, { error: "invalid_opportunity_type" });
       return;
     }
-
     const minimumGrossEdge = nonNegativeNumber(url.searchParams.get("minGrossEdge"), 0);
     const minimumNetEdge = nonNegativeNumber(url.searchParams.get("minNetEdge"), 0);
     const maxQuoteAgeMs = positiveNumber(url.searchParams.get("maxQuoteAgeMs")) ?? 15_000;
@@ -269,7 +299,6 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       json(response, 400, { error: "invalid_target_shares" });
       return;
     }
-
     const includeStale = url.searchParams.get("includeStale") === "true";
     const opportunities = findOpportunities(store.listMarkets(), store.listRelations(), {
       minimumGrossEdge,
@@ -278,7 +307,6 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       includeStale,
       ...(targetShares !== undefined ? { targetShares } : {})
     }).filter((opportunity) => !type || opportunity.type === type);
-
     json(response, 200, {
       count: opportunities.length,
       feesIncluded: true,
@@ -293,16 +321,8 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
 
   if (await handleQualityRequest(request, response, url, store, qualityRepository)) return;
-  if (await handleDatasetRequest(
-    request,
-    response,
-    url,
-    store,
-    qualityRepository,
-    datasetRepository,
-    datasetCaptureScheduler
-  )) return;
-
+  if (await handleDatasetRequest(request, response, url, store, qualityRepository, datasetRepository, datasetCaptureScheduler)) return;
+  if (await handleShadowRequest(request, response, url, shadowVerifier, qualityRepository)) return;
   json(response, 404, { error: "not_found" });
 }
 
@@ -319,18 +339,29 @@ async function initializeRuntime(): Promise<void> {
   const autoLive = process.env.PRED_MATCHER_LIVE_AUTO_START === "true";
   const autoCatalog = process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false";
   const autoDataset = process.env.PRED_MATCHER_DATASET_AUTO_CAPTURE !== "false";
+  const autoShadow = shadowVerifier.shouldAutoRun();
+  let synced = false;
 
   if (autoCatalog) catalogRefresher.start(false);
-  if (!store.getLastSync() && (autoCatalog || autoLive || autoDataset)) await performSync();
+  if (!store.getLastSync() && (autoCatalog || autoLive || autoDataset || autoShadow)) {
+    await performSync();
+    synced = true;
+  }
   if (autoLive && store.getLastSync()) await liveScanner.start();
   if (autoDataset) datasetCaptureScheduler.start(true);
+  if (autoShadow && store.getLastSync() && !synced) {
+    try {
+      await shadowVerifier.run();
+    } catch (error) {
+      console.error("initial shadow verification failed", error);
+    }
+  }
 }
 
 if (process.env.NODE_ENV !== "test") {
   const port = Number(process.env.PORT ?? 3000);
   const server = createAppServer();
   let shuttingDown = false;
-
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -343,10 +374,8 @@ if (process.env.NODE_ENV !== "test") {
       datasetRepository.close();
     });
   };
-
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-
   server.listen(port, "0.0.0.0", () => {
     console.log(`pred-matcher v${VERSION} listening on :${port}`);
     void initializeRuntime().catch((error: unknown) => {

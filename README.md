@@ -1,8 +1,8 @@
 # pred-matcher
 
-Durable live prediction-market matcher, contract verifier, executable-opportunity scanner, matcher-quality evaluator, and historical dataset/replay service for Polymarket and Kalshi.
+Durable live prediction-market matcher, contract verifier, executable-opportunity scanner, matcher-quality evaluator, historical dataset/replay service, and semantic-verifier shadow evaluator for Polymarket and Kalshi.
 
-Current version: **0.9.0**.
+Current version: **0.10.0**.
 
 ## Scope
 
@@ -22,6 +22,7 @@ Current version: **0.9.0**.
 - Historical replay using fixed, rematched, or originally captured relation graphs.
 - Offline threshold calibration over accumulated historical frames and adjudicated labels.
 - Frozen baseline regression gate in CI with explicit false-arbitrage protections.
+- Optional OpenAI semantic-verifier shadow mode with strict structured output and no influence on production relations or opportunities.
 
 ## Requirements
 
@@ -81,7 +82,7 @@ Set `PRED_MATCHER_PERSISTENCE=false` for RAM-only operational state.
 
 ## Matcher-quality data
 
-Relation labels and settlements live in a separate SQLite database:
+Relation labels, settlements, and semantic shadow observations live in a separate SQLite database:
 
 ```bash
 export PRED_MATCHER_QUALITY_DB_PATH='/var/lib/pred-matcher/quality.sqlite'
@@ -102,17 +103,13 @@ A label represents the adjudicated semantic relation for one market pair:
 
 For `IMPLIES`, `THRESHOLD_NESTED`, and `TIME_NESTED`, include `direction`. `type: "NONE"` is the hard-negative gold label. `PSEUDO` labels are excluded from `/v1/quality/report` unless `includePseudo=true` is explicitly requested.
 
-Create/update a label:
+Create/update a label and inspect current matcher quality:
 
 ```bash
 curl -X POST http://localhost:3000/v1/quality/labels \
   -H 'content-type: application/json' \
   -d '{"leftId":"polymarket:a","rightId":"kalshi:b","type":"EQUIVALENT","source":"ADJUDICATED"}'
-```
 
-Evaluate the current graph:
-
-```bash
 curl http://localhost:3000/v1/quality/report
 ```
 
@@ -149,12 +146,8 @@ curl 'http://localhost:3000/v1/dataset/frame?id=1'
 
 Every capture runs a wider semantic candidate pass (`minimumCandidateScore=0.20`) and persists pairs worth human review. It does **not** automatically create labels.
 
-Two candidate classes are stored:
-
 - `HARD_NEGATIVE`: retrieval found a plausible pair but the verifier rejected a strong relation, or classified it only as `SIMILAR`.
 - `UNCERTAIN_RELATION`: an arb-eligible relation was emitted below the review-confidence threshold.
-
-The queue records first/last seen timestamps, observation count, maximum review priority, retrieval score, predicted relation/confidence, titles, and diagnostic reasons.
 
 ```bash
 curl 'http://localhost:3000/v1/dataset/review?limit=100'
@@ -162,21 +155,14 @@ curl 'http://localhost:3000/v1/dataset/review?kind=HARD_NEGATIVE&unlabeled=true'
 curl 'http://localhost:3000/v1/dataset/review?kind=UNCERTAIN_RELATION&unlabeled=false'
 ```
 
-Adjudication still goes through `POST /v1/quality/labels`; the review queue never promotes a near-miss to `NONE`, `EQUIVALENT`, or another gold label by itself.
+Adjudication still goes through `POST /v1/quality/labels`; the review queue never promotes a near-miss to a gold label by itself.
 
 ## Offline calibration
 
-`0.9.0` adds an offline sweep over the historical dataset and adjudicated labels. The sweep varies both retrieval threshold and the minimum confidence accepted for arb-eligible relations. It does **not** automatically modify production matcher thresholds.
+The offline sweep varies both retrieval threshold and the minimum confidence accepted for arb-eligible relations. It does **not** automatically modify production matcher thresholds.
 
 ```bash
 npm run quality:sweep
-```
-
-By default the command reads:
-
-```text
-./data/pred-matcher-dataset.sqlite
-./data/pred-matcher-quality.sqlite
 ```
 
 Useful controls:
@@ -191,9 +177,7 @@ export PRED_MATCHER_CALIBRATION_MIN_ARB_PREDICTIONS=20
 export PRED_MATCHER_CALIBRATION_MIN_LABELED_PAIRS=100
 ```
 
-`PSEUDO` labels are excluded unless `PRED_MATCHER_CALIBRATION_INCLUDE_PSEUDO=true` is explicitly set.
-
-The JSON report contains every threshold point, candidate/relation counts, the full matcher quality report, an eligibility flag, a Pareto frontier, and a recommended point among configurations that satisfy the configured policy. Recommendation is advisory; production thresholds remain unchanged until deliberately changed in code/config.
+`PSEUDO` labels are excluded unless `PRED_MATCHER_CALIBRATION_INCLUDE_PSEUDO=true` is explicitly set. Recommendation is advisory; production thresholds remain unchanged until deliberately changed in code/config.
 
 ## Regression gate
 
@@ -203,9 +187,9 @@ CI runs:
 npm run quality:gate
 ```
 
-The gate evaluates the current matcher against `config/quality-regression-fixture.json` and compares it with a **frozen baseline prediction set** in the same fixture. The baseline is not recomputed using the candidate implementation; this prevents a matcher regression from redefining its own benchmark.
+The gate evaluates the current matcher against `config/quality-regression-fixture.json` and compares it with a frozen baseline prediction set in the same fixture. The baseline is not recomputed using the candidate implementation.
 
-The committed fixture currently protects representative `EQUIVALENT`, `THRESHOLD_NESTED`, `TIME_NESTED`, `IMPLIES`, and settlement-source-mismatch `SIMILAR` cases. Its default policy is fail-closed:
+Default policy is fail-closed:
 
 - `falseArbRate` must remain `0`;
 - no increase in false-arbitrage rate is allowed;
@@ -213,13 +197,51 @@ The committed fixture currently protects representative `EQUIVALENT`, `THRESHOLD
 - no micro recall drop is allowed;
 - the fixture must still produce the expected number of arb-eligible predictions.
 
-If a matcher change intentionally changes semantics, update the frozen fixture/baseline in the same reviewed change and explain why. Do not silently loosen the regression policy to make CI pass.
+Do not silently loosen the regression policy to make CI pass.
 
-A different fixture can be tested with:
+## Semantic verifier shadow mode
+
+`0.10.0` adds a pluggable semantic verifier after candidate retrieval. The OpenAI implementation uses the Responses API with strict JSON Schema output. Shadow output is **observational only**: it never replaces `store.listRelations()`, never creates an opportunity, and never changes matcher thresholds.
+
+Shadow mode is disabled by default so deployments do not unexpectedly incur external API cost. Enable manual shadow runs with:
 
 ```bash
-PRED_MATCHER_QUALITY_GATE_FIXTURE=./path/to/fixture.json npm run quality:gate
+export PRED_MATCHER_SHADOW_ENABLED=true
+export OPENAI_API_KEY='...'
+
+# Optional; default is the cost-oriented model below.
+export PRED_MATCHER_SHADOW_MODEL='gpt-5.6-luna'
+export PRED_MATCHER_SHADOW_MIN_CANDIDATE_SCORE=0.20
+export PRED_MATCHER_SHADOW_MAX_PAIRS=50
+export PRED_MATCHER_SHADOW_BATCH_SIZE=10
+export PRED_MATCHER_SHADOW_TIMEOUT_MS=45000
 ```
+
+Run and inspect:
+
+```bash
+curl http://localhost:3000/v1/shadow/status
+curl -X POST http://localhost:3000/v1/shadow/run
+curl 'http://localhost:3000/v1/shadow/runs?limit=20'
+curl 'http://localhost:3000/v1/shadow/observations?limit=100'
+curl http://localhost:3000/v1/shadow/report
+```
+
+Set `PRED_MATCHER_SHADOW_AUTO_RUN=true` only when you explicitly want a shadow pass after each successful catalog sync/refresh. Auto-run still remains fail-isolated from sync: provider errors are recorded/logged and do not alter the production relation graph.
+
+Selection prioritizes current arb-eligible relations, especially lower-confidence ones, followed by `SIMILAR` and rejected retrieval candidates. The semantic verifier is not shown the heuristic prediction, so disagreement measurement is less anchored to the current classifier.
+
+Only contract-semantic fields are sent to the verifier: IDs, venue, title, subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. Requests use `store: false`, and the runtime sends the API key only to the fixed OpenAI API origin.
+
+Each observation persists:
+
+- provider/model and run ID;
+- heuristic type/confidence/direction;
+- shadow type/confidence/direction;
+- concise evidence and material differences;
+- observation timestamp.
+
+For labels that overlap the selected pairs, every completed run stores two apples-to-apples quality reports: current heuristic vs shadow verifier. A disagreement is measurement data, not an automatic gold label and not permission to trade.
 
 ## Historical replay
 
@@ -237,11 +259,7 @@ curl -X POST http://localhost:3000/v1/dataset/replay \
   -d '{"mode":"CAPTURED_RELATIONS","limit":288,"minimumNetEdge":0,"maxQuoteAgeMs":15000,"includeStale":false}'
 ```
 
-Optional `from` and `to` ISO timestamps select a historical window. `limit` is capped at 1000 frames per request.
-
 ## Settlement feedback
-
-Store a resolved binary outcome:
 
 ```bash
 curl -X POST http://localhost:3000/v1/quality/settlements \
@@ -249,7 +267,7 @@ curl -X POST http://localhost:3000/v1/quality/settlements \
   -d '{"marketId":"kalshi:...","outcome":"YES","resolvedAt":"2026-09-16T10:00:00Z"}'
 ```
 
-`GET /v1/quality/settlement-report` reports `CONSISTENT`, `VIOLATED`, or `INCONCLUSIVE`. This is intentionally negative-evidence oriented: a violating realized outcome is strong evidence against a relation; a non-violating outcome does not prove semantic equivalence.
+`GET /v1/quality/settlement-report` reports `CONSISTENT`, `VIOLATED`, or `INCONCLUSIVE`. This is negative-evidence oriented: a violating outcome is strong evidence against a relation; a non-violating outcome does not prove equivalence.
 
 ## Catalog refresh and live data
 
@@ -278,10 +296,10 @@ Without credentials, Kalshi live mode reports `DEGRADED` and continues to expose
 
 ## Health and observability
 
-- `GET /health`: operational, quality, and dataset persistence status plus catalog/live/capture schedulers.
-- `GET /ready`: `200` only after restored/current sync state exists and all SQLite stores are healthy.
+- `GET /health`: operational, quality, dataset, catalog/live/capture, and shadow-verifier status.
+- `GET /ready`: `200` only after restored/current sync state exists and all required SQLite stores are healthy. Optional shadow-provider failure does not make the scanner unready.
 - `GET /metrics`: Prometheus scanner/runtime metrics.
-- `GET /v1/quality/status`: label/settlement database status.
+- `GET /v1/quality/status`: labels, settlements, shadow-run and shadow-observation persistence counts.
 - `GET /v1/dataset/status`: historical dataset database + capture scheduler status.
 
 ## API
@@ -321,6 +339,14 @@ Dataset:
 - `GET /v1/dataset/review?limit=...&kind=...&unlabeled=true|false`
 - `POST /v1/dataset/replay`
 
+Shadow verifier:
+
+- `GET /v1/shadow/status`
+- `POST /v1/shadow/run`
+- `GET /v1/shadow/runs?limit=...`
+- `GET /v1/shadow/observations?limit=...&runId=...`
+- `GET /v1/shadow/report?runId=...`
+
 ## Versioning
 
 The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
@@ -334,11 +360,12 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.7.0`: durable relation labels, matcher-quality metrics, settlement feedback, and historical replay.
 - `0.8.0`: automatic deduplicated historical dataset capture, review queues, and captured-relation replay.
 - `0.9.0`: offline threshold calibration, Pareto quality analysis, frozen baseline regression fixture, and CI quality gate.
+- `0.10.0`: pluggable semantic-verifier shadow mode with persisted disagreement/quality observations.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
 ## Important limitations
 
-`0.9.0` remains a scanner, not an atomic two-venue execution engine. Historical capture is sampled, not tick-complete, so replay cannot reconstruct opportunities shorter than the capture interval. Calibration quality is bounded by the coverage and correctness of adjudicated labels; a recommendation from a small or biased gold set must not be treated as proof of production safety.
+`0.10.0` remains a scanner, not an atomic two-venue execution engine. The semantic verifier is intentionally not trusted for production classification yet. LLM confidence is not semantic truth; promotion out of shadow mode requires enough adjudicated coverage to demonstrate improvement, especially no increase in `falseArbRate`, through the existing calibration/regression framework.
 
-The committed CI fixture is intentionally small and deterministic. It protects known semantic invariants but does not replace evaluation on the accumulated historical dataset. The SQLite stores are intentionally single-process; distributed deployment should move persistence interfaces to a shared transactional database.
+Historical capture is sampled rather than tick-complete. Calibration quality is bounded by gold-label coverage. The committed CI fixture is intentionally small and deterministic and does not replace evaluation on the accumulated dataset. SQLite stores remain single-process; distributed deployment should move persistence interfaces to a shared transactional database.
