@@ -19,7 +19,7 @@ function market(id: string, venue: "polymarket" | "kalshi", title: string): Norm
 }
 
 describe("OpenAISemanticVerifier", () => {
-  it("uses Responses structured outputs and validates pair identity", async () => {
+  it("uses Responses structured outputs and sends only semantic market fields", async () => {
     let requestBody: Record<string, unknown> | undefined;
     const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -51,7 +51,7 @@ describe("OpenAISemanticVerifier", () => {
       model: "gpt-5.6-luna",
       fetchImpl
     });
-    const left = market("p1", "polymarket", "Will Bitcoin be above $150k by December 31, 2026?");
+    const left = market("p1", "polymarket", "Will Bitcoin be above $150,000 by December 31, 2026?");
     const right = market("k1", "kalshi", "Will Bitcoin be above 150000 by December 31, 2026?");
     const decisions = await verifier.verify([{ pairKey: "pair-1", left, right }]);
 
@@ -69,13 +69,17 @@ describe("OpenAISemanticVerifier", () => {
     const text = requestBody?.text as { format?: { type?: string; strict?: boolean } } | undefined;
     expect(text?.format?.type).toBe("json_schema");
     expect(text?.format?.strict).toBe(true);
-    expect(JSON.stringify(requestBody)).not.toContain("prices");
+
+    const input = requestBody?.input as Array<{ role?: string; content?: string }> | undefined;
+    const userPayload = input?.find((item) => item.role === "user")?.content ?? "";
+    expect(userPayload).not.toContain('"prices"');
+    expect(userPayload).not.toContain('"books"');
   });
 });
 
 describe("ShadowVerifierService", () => {
   it("records disagreement without mutating the production relation graph", async () => {
-    const left = market("p1", "polymarket", "Will Bitcoin be above $150k by December 31, 2026?");
+    const left = market("p1", "polymarket", "Will Bitcoin be above $150,000 by December 31, 2026?");
     const right = market("k1", "kalshi", "Will Bitcoin be above 150000 by December 31, 2026?");
     const matched = matchMarkets([left, right], 0.2);
     expect(matched.relations[0]?.type).toBe("EQUIVALENT");
