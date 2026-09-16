@@ -2,7 +2,7 @@
 
 Durable prediction-market semantic matcher and executable-opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.11.0**.
+Current version: **0.12.0**.
 
 ## Scope
 
@@ -12,8 +12,9 @@ Current version: **0.11.0**.
 - Live Polymarket/Kalshi books with relation-local recomputation.
 - SQLite/WAL operational state, labels, settlements, historical snapshots, and replay.
 - Precision/recall/F1 and `falseArbRate` evaluation plus frozen CI regression gates.
-- Optional OpenAI semantic verifier in shadow mode with no production influence.
-- Historical multi-model shadow A/B with prompt versioning, token/cost/latency accounting, and disagreement review.
+- OpenAI semantic verifier in observational shadow mode.
+- Historical multi-model A/B with prompt versioning, usage/cost accounting, and disagreement review.
+- Statistical promotion gate and opt-in `VETO_ONLY` production policy that can remove, but never create, arb-eligible relations.
 
 ## Requirements
 
@@ -21,15 +22,6 @@ Current version: **0.11.0**.
 - npm 11+
 
 The service uses Node's built-in `node:sqlite`.
-
-Pinned package versions:
-
-- `ws 8.21.3`
-- `@types/ws 8.18.1`
-- `@types/node 24.13.4`
-- `tsx 4.23.13`
-- `typescript 7.0.2`
-- `vitest 5.0.0`
 
 ## Run
 
@@ -49,7 +41,7 @@ Default databases:
 
 ## Production scanner
 
-The production relation graph remains deterministic. `SIMILAR` is never arb-eligible. Opportunities use executable ask-side liquidity, full depth, fees, and quote freshness.
+By default (`PRED_MATCHER_SEMANTIC_MODE=OFF`) the production relation graph is deterministic. `SIMILAR` is never arb-eligible. Opportunities use executable ask-side liquidity, full depth, fees, and quote freshness.
 
 Core endpoints:
 
@@ -90,7 +82,7 @@ export PRED_MATCHER_DATASET_DB_PATH='/var/lib/pred-matcher/dataset.sqlite'
 export PRED_MATCHER_HISTORY_LIMIT=20000
 ```
 
-Gold relation labels use `MANUAL` or `ADJUDICATED` provenance. `PSEUDO` labels are excluded from normal quality/calibration/shadow A/B scoring unless explicitly requested by the corresponding legacy quality endpoint.
+Gold relation labels use `MANUAL` or `ADJUDICATED` provenance. `PSEUDO` labels are excluded from promotion decisions.
 
 ```bash
 curl -X POST http://localhost:3000/v1/quality/labels \
@@ -121,7 +113,7 @@ Calibration is advisory and never changes production thresholds automatically. C
 
 ## Semantic verifier shadow mode
 
-Shadow output is **observational only**: it never replaces production relations, never creates an opportunity, and provider failure does not fail catalog sync.
+Shadow output is observational only: it never replaces production relations, never creates an opportunity, and provider failure does not fail catalog sync.
 
 ```bash
 export PRED_MATCHER_SHADOW_ENABLED=true
@@ -137,9 +129,9 @@ curl http://localhost:3000/v1/shadow/report
 
 The verifier receives contract-semantic fields only: IDs, venue, title/subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. OpenAI Responses requests use `store: false`, and runtime API-key traffic is fixed to `https://api.openai.com/v1`.
 
-The model is not shown the heuristic prediction. The prompt used by the OpenAI provider is explicitly versioned as `semantic-contract-v1`.
+The model is not shown the heuristic prediction. The OpenAI prompt is versioned as `semantic-contract-v1`.
 
-## Historical shadow A/B — v0.11.0
+## Historical shadow A/B
 
 Historical evaluation is an explicit CLI operation, not part of normal sync, so multi-model spend cannot start accidentally:
 
@@ -152,19 +144,9 @@ export PRED_MATCHER_SHADOW_BATCH_SIZE=10
 npm run shadow:backfill
 ```
 
-If `PRED_MATCHER_SHADOW_MODELS` is omitted, the CLI uses `PRED_MATCHER_SHADOW_MODEL`, then falls back to the single model `gpt-5.6-luna`.
+Every configured model receives the same deduplicated selected pair set. Runs persist prompt/model identity, token usage, cumulative latency, estimated cost, quality on overlapping gold labels, pairwise model disagreement, and review candidates.
 
-The experiment runner:
-
-1. loads saved dataset frames;
-2. retrieves and prioritizes semantic candidate pairs;
-3. deduplicates by pair and gives **the same selected pair set** to every model;
-4. records one model run per verifier under a common `experimentId`;
-5. evaluates heuristic and model predictions only on overlapping non-`PSEUDO` gold labels;
-6. compares exact relation+direction signatures model-to-model;
-7. creates review candidates for gold-label, model-model, and model-heuristic disagreements.
-
-Inspect experiments and review candidates:
+Inspect results:
 
 ```bash
 curl 'http://localhost:3000/v1/shadow/experiments?limit=20'
@@ -172,31 +154,71 @@ curl 'http://localhost:3000/v1/shadow/experiment?id=EXPERIMENT_ID'
 curl 'http://localhost:3000/v1/shadow/review?experimentId=EXPERIMENT_ID&limit=100'
 ```
 
-### Usage and cost accounting
+Cost accounting is an estimate, not billing truth. Known model rates are tied to the pricing snapshot stored in code; unknown model IDs produce `estimatedCostUsd: null` instead of a guessed number.
 
-Each shadow run records request count, input/cached/cache-write/output/total tokens, cumulative request latency, and estimated USD cost.
+## Shadow promotion gate — v0.12.0
 
-Cost is an **estimate, not billing truth**. `0.11.0` uses the pricing snapshot **2026-09-16** for exact known model IDs:
+Promotion evaluates the **combined veto policy**, not the LLM as a replacement matcher. For each labeled historical pair, the baseline is the heuristic relation recorded with the shadow observation. An arb-eligible heuristic relation survives the candidate policy only when the pinned semantic model returns the exact same relation type/direction at or above the configured confidence threshold. Non-arb relations are unchanged.
 
-| Model | Input / 1M | Cached input / 1M | Output / 1M |
-| --- | ---: | ---: | ---: |
-| `gpt-5.6-luna` | $0.20 | $0.02 | $1.20 |
-| `gpt-5.6-terra` | $2.00 | $0.20 | $12.00 |
-| `gpt-5.6-sol` / `gpt-5.6` | $4.00 | $0.40 | $20.00 |
+The default policy requires:
 
-Cache-write tokens are estimated at 1.25× the uncached-input price. Unknown model IDs return `estimatedCostUsd: null` instead of guessing. OpenAI billing remains authoritative, and future pricing or special long-context pricing can differ from this snapshot.
+- exact model pin and prompt-version pin;
+- at least 100 overlapping non-`PSEUDO` labeled pairs;
+- at least 75 arb-eligible predictions retained after veto;
+- 95% Wilson upper bound for candidate `falseArbRate` <= 5%;
+- arb precision improvement of at least 0.1 percentage points over the heuristic baseline;
+- no micro-precision regression;
+- no recall regression.
 
-Official references used for this snapshot:
+The Wilson bound prevents a small `0/N` sample from being treated as zero risk. The retained-arb minimum prevents a trivial policy from looking perfect by vetoing nearly everything.
 
-- https://developers.openai.com/api/reference/cli/resources/responses/methods/create
-- https://developers.openai.com/api/docs/models/gpt-5.6-luna
-- https://developers.openai.com/api/docs/models/gpt-5.6-terra
-- https://developers.openai.com/api/docs/models/gpt-5.6-sol
+Pins are mandatory for production promotion:
+
+```bash
+export PRED_MATCHER_PROMOTED_MODEL='gpt-5.6-luna'
+export PRED_MATCHER_PROMOTED_PROMPT_VERSION='semantic-contract-v1'
+
+npm run shadow:promotion
+curl http://localhost:3000/v1/shadow/promotion
+```
+
+`npm run shadow:promotion` exits non-zero when the gate is not eligible, making it suitable for a deployment check. Useful policy controls:
+
+```bash
+export PRED_MATCHER_PROMOTION_MIN_LABELED_PAIRS=100
+export PRED_MATCHER_PROMOTION_MIN_ARB_PREDICTIONS=75
+export PRED_MATCHER_PROMOTION_MAX_FALSE_ARB_UCB=0.05
+export PRED_MATCHER_PROMOTION_MIN_ARB_PRECISION_GAIN=0.001
+export PRED_MATCHER_PROMOTION_MIN_MICRO_PRECISION_DELTA=0
+export PRED_MATCHER_PROMOTION_MIN_RECALL_DELTA=0
+export PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE=0.80
+export PRED_MATCHER_PROMOTION_CONFIDENCE_Z=1.96
+```
+
+### VETO_ONLY production mode
+
+`VETO_ONLY` is opt-in and fail-closed:
+
+```bash
+export OPENAI_API_KEY='...'
+export PRED_MATCHER_PROMOTED_MODEL='gpt-5.6-luna'
+export PRED_MATCHER_PROMOTED_PROMPT_VERSION='semantic-contract-v1'
+export PRED_MATCHER_SEMANTIC_MODE=VETO_ONLY
+
+# Optional runtime controls.
+export PRED_MATCHER_VETO_BATCH_SIZE=10
+export PRED_MATCHER_VETO_MAX_RELATIONS=500
+```
+
+During catalog sync the deterministic matcher runs first. Only its arb-eligible relations are sent to the pinned verifier. A relation is retained only on exact type+direction agreement and sufficient semantic confidence. The verifier cannot add a relation or upgrade `SIMILAR`/`NONE` into an arb relation.
+
+When `VETO_ONLY` is configured, any of the following aborts the new sync before `store.replace(...)`: promotion gate failure, missing provider configuration, model/prompt pin mismatch, relation-count safety limit, timeout/refusal/provider error, or malformed verifier output. The previous durable snapshot therefore remains in place. `/ready` remains `503` until a snapshot has successfully passed the configured veto policy.
 
 ## Shadow API
 
 ```text
 GET  /v1/shadow/status
+GET  /v1/shadow/promotion
 POST /v1/shadow/run
 GET  /v1/shadow/runs?limit=...
 GET  /v1/shadow/observations?limit=...&runId=...
@@ -223,6 +245,7 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.9.0`: offline calibration and CI regression gate.
 - `0.10.0`: semantic verifier shadow mode.
 - `0.11.0`: historical shadow backfill, model A/B, prompt versioning, usage/cost accounting, disagreement review.
+- `0.12.0`: statistical semantic promotion gate and fail-closed `VETO_ONLY` production policy.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
@@ -230,6 +253,8 @@ Backward-compatible features increment `MINOR` while pre-1.0; bug fixes incremen
 
 This remains a scanner, not an atomic two-venue execution engine. Cross-venue fills can race and settlement/venue risk remains.
 
-Historical capture is sampled rather than tick-complete. Historical shadow experiments currently deduplicate repeated frames by market pair rather than evaluating every semantic version of the same pair.
+Historical capture is sampled rather than tick-complete. Promotion quality is bounded by adjudicated-label coverage and by the representativeness of historical candidate selection. A passing statistical gate reduces measured risk; it does not prove semantic correctness.
 
-LLM confidence is not semantic truth. Shadow output stays non-production until enough adjudicated coverage demonstrates better precision/recall without increasing `falseArbRate`. Pricing estimates are informational only. SQLite remains single-process; distributed deployment should move persistence interfaces to a shared transactional database.
+`VETO_ONLY` can only reduce the current heuristic arb set. It cannot discover opportunities the deterministic matcher missed. External verifier availability becomes part of catalog-refresh availability only when `VETO_ONLY` is explicitly enabled.
+
+SQLite remains single-process; distributed deployment should move persistence interfaces to a shared transactional database.

@@ -239,11 +239,24 @@ export interface IncrementalUpdateResult {
   persistenceError?: string;
 }
 
+export interface SemanticPolicySyncResult {
+  mode: "VETO_ONLY";
+  gateEligible: true;
+  model: string;
+  promptVersion: string;
+  checkedRelations: number;
+  vetoedRelations: number;
+  confirmedRelations: number;
+  requests: number;
+  estimatedCostUsd: number | null;
+}
+
 export interface SyncResult {
   fetched: Record<Venue, number>;
   totalMarkets: number;
   candidatePairs: number;
   relations: number;
   opportunities: number;
+  semanticPolicy?: SemanticPolicySyncResult;
   syncedAt: string;
 }

@@ -9,16 +9,19 @@ import { handleDatasetRequest } from "./service/dataset-api.js";
 import { DatasetRepository } from "./service/dataset-repository.js";
 import { LiveScanner } from "./service/live-scanner.js";
 import { renderPrometheusMetrics } from "./service/metrics.js";
+import { PromotionGateService } from "./service/promotion-gate.js";
 import { handleQualityRequest } from "./service/quality-api.js";
 import { QualityRepository } from "./service/quality-repository.js";
+import { SemanticVetoError, SemanticVetoService, type SemanticProductionMode } from "./service/semantic-veto.js";
 import { handleShadowRequest } from "./service/shadow-api.js";
 import { ShadowVerifierService } from "./service/shadow-verifier.js";
 import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.11.0";
+const VERSION = "0.12.0";
 const STARTED_AT_MS = Date.now();
+const PROMPT_VERSION = "semantic-contract-v1";
 
 function configuredPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -32,6 +35,20 @@ function configuredProbability(name: string, fallback: number): number {
   if (!raw) return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : fallback;
+}
+
+function configuredNonNegative(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function configuredPositive(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function createPersistence(): SqliteStateRepository | undefined {
@@ -66,12 +83,37 @@ function createSemanticVerifier(): OpenAISemanticVerifier | undefined {
   });
 }
 
+function semanticMode(): SemanticProductionMode {
+  return process.env.PRED_MATCHER_SEMANTIC_MODE === "VETO_ONLY" ? "VETO_ONLY" : "OFF";
+}
+
 const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
 const store = new MemoryStore(historyLimit, createPersistence());
 const qualityRepository = createQualityRepository();
 const datasetRepository = createDatasetRepository();
 const liveScanner = new LiveScanner(store);
-const shadowVerifier = new ShadowVerifierService(store, qualityRepository, createSemanticVerifier(), {
+const semanticVerifier = createSemanticVerifier();
+const promotedModel = process.env.PRED_MATCHER_PROMOTED_MODEL?.trim() || "__UNPINNED_MODEL__";
+const promotedPromptVersion = process.env.PRED_MATCHER_PROMOTED_PROMPT_VERSION?.trim() || "__UNPINNED_PROMPT__";
+const promotionGate = new PromotionGateService(qualityRepository, {
+  model: promotedModel,
+  promptVersion: promotedPromptVersion,
+  minimumLabeledPairs: configuredPositiveInt("PRED_MATCHER_PROMOTION_MIN_LABELED_PAIRS", 100),
+  minimumRetainedArbPredictions: configuredPositiveInt("PRED_MATCHER_PROMOTION_MIN_ARB_PREDICTIONS", 75),
+  maximumFalseArbRateUpperBound: configuredProbability("PRED_MATCHER_PROMOTION_MAX_FALSE_ARB_UCB", 0.05),
+  minimumArbPrecisionGain: configuredNonNegative("PRED_MATCHER_PROMOTION_MIN_ARB_PRECISION_GAIN", 0.001),
+  minimumMicroPrecisionDelta: configuredNonNegative("PRED_MATCHER_PROMOTION_MIN_MICRO_PRECISION_DELTA", 0),
+  minimumRecallDelta: configuredNonNegative("PRED_MATCHER_PROMOTION_MIN_RECALL_DELTA", 0),
+  minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8),
+  confidenceZ: configuredPositive("PRED_MATCHER_PROMOTION_CONFIDENCE_Z", 1.96)
+});
+const semanticVeto = new SemanticVetoService(semanticVerifier, promotionGate, {
+  mode: semanticMode(),
+  batchSize: configuredPositiveInt("PRED_MATCHER_VETO_BATCH_SIZE", 10),
+  maximumRelations: configuredPositiveInt("PRED_MATCHER_VETO_MAX_RELATIONS", 500),
+  minimumSemanticConfidence: configuredProbability("PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE", 0.8)
+});
+const shadowVerifier = new ShadowVerifierService(store, qualityRepository, semanticVerifier, {
   enabled: process.env.PRED_MATCHER_SHADOW_ENABLED === "true",
   autoRun: process.env.PRED_MATCHER_SHADOW_AUTO_RUN === "true",
   minimumCandidateScore: configuredProbability("PRED_MATCHER_SHADOW_MIN_CANDIDATE_SCORE", 0.2),
@@ -90,16 +132,12 @@ let activeSync: Promise<unknown> | undefined;
 async function performSync(): Promise<unknown> {
   if (activeSync) return activeSync;
   const restartLive = liveScanner.getStatus().running;
-  activeSync = syncAll(store);
+  activeSync = syncAll(store, semanticVeto);
   try {
     const result = await activeSync;
     if (restartLive) await liveScanner.restart();
     if (shadowVerifier.shouldAutoRun()) {
-      try {
-        await shadowVerifier.run();
-      } catch (error) {
-        console.error("shadow verification failed", error);
-      }
+      try { await shadowVerifier.run(); } catch (error) { console.error("shadow verification failed", error); }
     }
     return result;
   } finally {
@@ -148,6 +186,16 @@ function positiveNumber(value: string | null): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function semanticReady(): boolean {
+  if (semanticVeto.mode !== "VETO_ONLY") return true;
+  const status = semanticVeto.getStatus();
+  const lastSync = store.getLastSync();
+  return status.configured && status.promotionEligible &&
+    lastSync?.semanticPolicy?.mode === "VETO_ONLY" &&
+    lastSync.semanticPolicy.model === promotedModel &&
+    lastSync.semanticPolicy.promptVersion === promotedPromptVersion;
+}
+
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = urlFor(request);
 
@@ -155,7 +203,9 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const persistence = store.getPersistenceStatus();
     const quality = qualityRepository.status();
     const dataset = datasetRepository.status();
-    const healthy = persistence.healthy && quality.healthy && dataset.healthy;
+    const semantic = semanticVeto.getStatus();
+    const semanticHealthy = semantic.mode !== "VETO_ONLY" || (semantic.configured && semantic.promotionEligible);
+    const healthy = persistence.healthy && quality.healthy && dataset.healthy && semanticHealthy;
     json(response, healthy ? 200 : 503, {
       status: healthy ? "ok" : "degraded",
       version: VERSION,
@@ -166,7 +216,8 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       datasetCapture: datasetCaptureScheduler.getStatus(),
       catalog: catalogRefresher.getStatus(),
       live: liveScanner.getStatus(),
-      shadow: shadowVerifier.getStatus()
+      shadow: shadowVerifier.getStatus(),
+      semantic
     });
     return;
   }
@@ -175,13 +226,15 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const persistence = store.getPersistenceStatus();
     const quality = qualityRepository.status();
     const dataset = datasetRepository.status();
-    const ready = Boolean(store.getLastSync()) && persistence.healthy && quality.healthy && dataset.healthy;
+    const semanticPolicyReady = semanticReady();
+    const ready = Boolean(store.getLastSync()) && persistence.healthy && quality.healthy && dataset.healthy && semanticPolicyReady;
     json(response, ready ? 200 : 503, {
       ready,
       restoredOrSynced: Boolean(store.getLastSync()),
       persistenceHealthy: persistence.healthy,
       qualityPersistenceHealthy: quality.healthy,
-      datasetPersistenceHealthy: dataset.healthy
+      datasetPersistenceHealthy: dataset.healthy,
+      semanticPolicyReady
     });
     return;
   }
@@ -219,7 +272,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     return;
   }
   if (request.method === "POST" && url.pathname === "/v1/live/start") {
-    if (!store.getLastSync()) await performSync();
+    if (!store.getLastSync() || !semanticReady()) await performSync();
     json(response, 200, await liveScanner.start());
     return;
   }
@@ -286,6 +339,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       targetShares: targetShares ?? null,
       persistence: store.getPersistenceStatus(),
       live: liveScanner.getStatus(),
+      semantic: semanticVeto.getStatus(),
       opportunities
     });
     return;
@@ -293,13 +347,17 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
 
   if (await handleQualityRequest(request, response, url, store, qualityRepository)) return;
   if (await handleDatasetRequest(request, response, url, store, qualityRepository, datasetRepository, datasetCaptureScheduler)) return;
-  if (await handleShadowRequest(request, response, url, shadowVerifier, qualityRepository)) return;
+  if (await handleShadowRequest(request, response, url, shadowVerifier, qualityRepository, promotionGate)) return;
   json(response, 404, { error: "not_found" });
 }
 
 export function createAppServer() {
   return createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
+      if (error instanceof SemanticVetoError) {
+        json(response, 503, { error: error.code });
+        return;
+      }
       const message = error instanceof Error ? error.message : "unknown_error";
       json(response, 500, { error: "internal_error", message });
     });
@@ -311,14 +369,15 @@ async function initializeRuntime(): Promise<void> {
   const autoCatalog = process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false";
   const autoDataset = process.env.PRED_MATCHER_DATASET_AUTO_CAPTURE !== "false";
   const autoShadow = shadowVerifier.shouldAutoRun();
+  const requiresVetoRefresh = semanticVeto.mode === "VETO_ONLY" && !semanticReady();
   let synced = false;
 
   if (autoCatalog) catalogRefresher.start(false);
-  if (!store.getLastSync() && (autoCatalog || autoLive || autoDataset || autoShadow)) {
+  if ((!store.getLastSync() && (autoCatalog || autoLive || autoDataset || autoShadow)) || requiresVetoRefresh) {
     await performSync();
     synced = true;
   }
-  if (autoLive && store.getLastSync()) await liveScanner.start();
+  if (autoLive && store.getLastSync() && semanticReady()) await liveScanner.start();
   if (autoDataset) datasetCaptureScheduler.start(true);
   if (autoShadow && store.getLastSync() && !synced) {
     try { await shadowVerifier.run(); } catch (error) { console.error("initial shadow verification failed", error); }
