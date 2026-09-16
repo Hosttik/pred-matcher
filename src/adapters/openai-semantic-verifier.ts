@@ -1,18 +1,17 @@
+import { estimateOpenAICostUsd, OPENAI_PRICING_SNAPSHOT } from "../core/openai-pricing.js";
 import type {
   SemanticRelationType,
   SemanticVerifier,
+  SemanticVerifierBatchResult,
   SemanticVerifierDecision,
   SemanticVerifierPair
 } from "../core/semantic-verifier.js";
 import type { NormalizedMarket } from "../core/types.js";
 
+export const OPENAI_SEMANTIC_PROMPT_VERSION = "semantic-contract-v1";
+
 const RELATION_TYPES: SemanticRelationType[] = [
-  "NONE",
-  "EQUIVALENT",
-  "SIMILAR",
-  "THRESHOLD_NESTED",
-  "TIME_NESTED",
-  "IMPLIES"
+  "NONE", "EQUIVALENT", "SIMILAR", "THRESHOLD_NESTED", "TIME_NESTED", "IMPLIES"
 ];
 const DIRECTIONS = ["NONE", "LEFT_IMPLIES_RIGHT", "RIGHT_IMPLIES_LEFT"] as const;
 
@@ -26,20 +25,9 @@ const RESPONSE_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: [
-          "pairKey",
-          "leftId",
-          "rightId",
-          "type",
-          "direction",
-          "confidence",
-          "evidence",
-          "materialDifferences"
-        ],
+        required: ["pairKey", "leftId", "rightId", "type", "direction", "confidence", "evidence", "materialDifferences"],
         properties: {
-          pairKey: { type: "string" },
-          leftId: { type: "string" },
-          rightId: { type: "string" },
+          pairKey: { type: "string" }, leftId: { type: "string" }, rightId: { type: "string" },
           type: { type: "string", enum: RELATION_TYPES },
           direction: { type: "string", enum: DIRECTIONS },
           confidence: { type: "number", minimum: 0, maximum: 1 },
@@ -72,30 +60,20 @@ interface OpenAIResponseBody {
   status?: string;
   incomplete_details?: { reason?: string };
   error?: { message?: string };
-  output?: Array<{
-    type?: string;
-    content?: Array<{
-      type?: string;
-      text?: string;
-      refusal?: string;
-    }>;
-  }>;
+  output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string; refusal?: string }> }>;
+  usage?: {
+    input_tokens?: number;
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    output_tokens?: number;
+    total_tokens?: number;
+  };
 }
 
 interface ParsedDecision {
-  pairKey: unknown;
-  leftId: unknown;
-  rightId: unknown;
-  type: unknown;
-  direction: unknown;
-  confidence: unknown;
-  evidence: unknown;
-  materialDifferences: unknown;
+  pairKey: unknown; leftId: unknown; rightId: unknown; type: unknown; direction: unknown;
+  confidence: unknown; evidence: unknown; materialDifferences: unknown;
 }
-
-interface ParsedOutput {
-  decisions?: unknown;
-}
+interface ParsedOutput { decisions?: unknown; }
 
 export interface OpenAISemanticVerifierOptions {
   apiKey: string;
@@ -139,9 +117,7 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function validateDecision(value: unknown, expected: SemanticVerifierPair): SemanticVerifierDecision {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("semantic_verifier_invalid_decision");
-  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("semantic_verifier_invalid_decision");
   const decision = value as ParsedDecision;
   if (decision.pairKey !== expected.pairKey || decision.leftId !== expected.left.id || decision.rightId !== expected.right.id) {
     throw new Error("semantic_verifier_pair_mismatch");
@@ -159,12 +135,8 @@ function validateDecision(value: unknown, expected: SemanticVerifierPair): Seman
   if (typeof decision.confidence !== "number" || !Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1) {
     throw new Error("semantic_verifier_invalid_confidence");
   }
-  if (!isStringArray(decision.evidence) || !isStringArray(decision.materialDifferences)) {
-    throw new Error("semantic_verifier_invalid_evidence");
-  }
-  const direction = decision.direction === "NONE"
-    ? undefined
-    : decision.direction as "LEFT_IMPLIES_RIGHT" | "RIGHT_IMPLIES_LEFT";
+  if (!isStringArray(decision.evidence) || !isStringArray(decision.materialDifferences)) throw new Error("semantic_verifier_invalid_evidence");
+  const direction = decision.direction === "NONE" ? undefined : decision.direction as "LEFT_IMPLIES_RIGHT" | "RIGHT_IMPLIES_LEFT";
   return {
     pairKey: expected.pairKey,
     leftId: expected.left.id,
@@ -180,6 +152,7 @@ function validateDecision(value: unknown, expected: SemanticVerifierPair): Seman
 export class OpenAISemanticVerifier implements SemanticVerifier {
   readonly provider = "openai";
   readonly model: string;
+  readonly promptVersion = OPENAI_SEMANTIC_PROMPT_VERSION;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
@@ -193,51 +166,44 @@ export class OpenAISemanticVerifier implements SemanticVerifier {
   }
 
   async verify(pairs: readonly SemanticVerifierPair[]): Promise<SemanticVerifierDecision[]> {
-    if (pairs.length === 0) return [];
+    return (await this.verifyDetailed(pairs)).decisions;
+  }
+
+  async verifyDetailed(pairs: readonly SemanticVerifierPair[]): Promise<SemanticVerifierBatchResult> {
+    if (pairs.length === 0) {
+      return {
+        decisions: [],
+        usage: {
+          requests: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0,
+          outputTokens: 0, totalTokens: 0, latencyMs: 0, estimatedCostUsd: 0,
+          pricingSnapshot: OPENAI_PRICING_SNAPSHOT
+        }
+      };
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const started = Date.now();
     try {
       const response = await this.fetchImpl(`${this.baseUrl}/responses`, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${this.options.apiKey}`,
-          "content-type": "application/json"
-        },
+        headers: { authorization: `Bearer ${this.options.apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({
           model: this.model,
           store: false,
           input: [
             { role: "system", content: SYSTEM_PROMPT },
-            {
-              role: "user",
-              content: JSON.stringify({
-                pairs: pairs.map((pair) => ({
-                  pairKey: pair.pairKey,
-                  left: marketDocument(pair.left),
-                  right: marketDocument(pair.right)
-                }))
-              })
-            }
+            { role: "user", content: JSON.stringify({ pairs: pairs.map((pair) => ({
+              pairKey: pair.pairKey, left: marketDocument(pair.left), right: marketDocument(pair.right)
+            })) }) }
           ],
-          text: {
-            format: {
-              type: "json_schema",
-              name: "prediction_market_relation_verification",
-              strict: true,
-              schema: RESPONSE_SCHEMA
-            }
-          },
+          text: { format: { type: "json_schema", name: "prediction_market_relation_verification", strict: true, schema: RESPONSE_SCHEMA } },
           max_output_tokens: Math.max(2_000, pairs.length * 700)
         }),
         signal: controller.signal
       });
       const body = await response.json() as OpenAIResponseBody;
-      if (!response.ok) {
-        throw new Error(`semantic_verifier_http_${response.status}:${body.error?.message ?? "unknown_error"}`);
-      }
-      if (body.status === "incomplete") {
-        throw new Error(`semantic_verifier_incomplete:${body.incomplete_details?.reason ?? "unknown"}`);
-      }
+      if (!response.ok) throw new Error(`semantic_verifier_http_${response.status}:${body.error?.message ?? "unknown_error"}`);
+      if (body.status === "incomplete") throw new Error(`semantic_verifier_incomplete:${body.incomplete_details?.reason ?? "unknown"}`);
       const parsed = JSON.parse(outputText(body)) as ParsedOutput;
       if (!Array.isArray(parsed.decisions)) throw new Error("semantic_verifier_invalid_output");
       if (parsed.decisions.length !== pairs.length) throw new Error("semantic_verifier_incomplete_decisions");
@@ -245,15 +211,32 @@ export class OpenAISemanticVerifier implements SemanticVerifier {
       const seen = new Set<string>();
       const decisions = parsed.decisions.map((value) => {
         const pairKey = typeof value === "object" && value !== null && !Array.isArray(value)
-          ? (value as { pairKey?: unknown }).pairKey
-          : undefined;
+          ? (value as { pairKey?: unknown }).pairKey : undefined;
         if (typeof pairKey !== "string" || seen.has(pairKey)) throw new Error("semantic_verifier_duplicate_or_unknown_pair");
         const pair = expected.get(pairKey);
         if (!pair) throw new Error("semantic_verifier_duplicate_or_unknown_pair");
         seen.add(pairKey);
         return validateDecision(value, pair);
       });
-      return decisions;
+      const inputTokens = body.usage?.input_tokens ?? 0;
+      const cachedInputTokens = body.usage?.input_tokens_details?.cached_tokens ?? 0;
+      const cacheWriteTokens = body.usage?.input_tokens_details?.cache_write_tokens ?? 0;
+      const outputTokens = body.usage?.output_tokens ?? 0;
+      const totalTokens = body.usage?.total_tokens ?? inputTokens + outputTokens;
+      return {
+        decisions,
+        usage: {
+          requests: 1,
+          inputTokens,
+          cachedInputTokens,
+          cacheWriteTokens,
+          outputTokens,
+          totalTokens,
+          latencyMs: Date.now() - started,
+          estimatedCostUsd: estimateOpenAICostUsd(this.model, { inputTokens, cachedInputTokens, cacheWriteTokens, outputTokens }),
+          pricingSnapshot: OPENAI_PRICING_SNAPSHOT
+        }
+      };
     } finally {
       clearTimeout(timeout);
     }
