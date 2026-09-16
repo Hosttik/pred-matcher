@@ -1,8 +1,8 @@
 # pred-matcher
 
-Durable live prediction-market relation, contract-verification, matcher-quality, historical-replay, and net executable opportunity scanner for Polymarket and Kalshi.
+Durable live prediction-market matcher, contract verifier, executable-opportunity scanner, matcher-quality evaluator, and historical dataset/replay service for Polymarket and Kalshi.
 
-Current version: **0.7.0**.
+Current version: **0.8.0**.
 
 ## Scope
 
@@ -17,7 +17,9 @@ Current version: **0.7.0**.
 - Durable relation-label dataset with `MANUAL`, `ADJUDICATED`, and `PSEUDO` provenance.
 - Matcher precision/recall/F1 and false-arbitrage-rate reporting.
 - Settlement-consistency feedback for resolved binary markets.
-- Historical replay in fixed-relation or full-rematch mode with opportunity lifetime/session statistics.
+- Automatic historical market/relation snapshots with content-addressed deduplication.
+- Hard-negative and uncertainty-based review queue.
+- Historical replay using fixed, rematched, or originally captured relation graphs.
 
 ## Requirements
 
@@ -42,16 +44,12 @@ npm install
 npm run dev
 ```
 
-Default operational database:
+Default databases:
 
 ```text
 ./data/pred-matcher.sqlite
-```
-
-Default matcher-quality database:
-
-```text
 ./data/pred-matcher-quality.sqlite
+./data/pred-matcher-dataset.sqlite
 ```
 
 Manual catalog sync:
@@ -71,8 +69,6 @@ curl http://localhost:3000/v1/live/status
 
 `0.6.0+` persists markets, relations, current opportunities, lifecycle history, and last sync state in SQLite/WAL. A full sync replaces the catalog snapshot transactionally; live price changes use incremental writes.
 
-Configuration:
-
 ```bash
 export PRED_MATCHER_DB_PATH='/var/lib/pred-matcher/state.sqlite'
 export PRED_MATCHER_HISTORY_LIMIT=20000
@@ -81,9 +77,9 @@ export PRED_MATCHER_PERSISTENCE=true
 
 Set `PRED_MATCHER_PERSISTENCE=false` for RAM-only operational state.
 
-## Matcher-quality dataset
+## Matcher-quality data
 
-`0.7.0` deliberately separates evaluation data from runtime scanner state. Relation labels and settlements are stored in a second SQLite database:
+Relation labels and settlements live in a separate SQLite database:
 
 ```bash
 export PRED_MATCHER_QUALITY_DB_PATH='/var/lib/pred-matcher/quality.sqlite'
@@ -102,19 +98,7 @@ A label represents the adjudicated semantic relation for one market pair:
 }
 ```
 
-For directed relations (`IMPLIES`, `THRESHOLD_NESTED`, `TIME_NESTED`) include:
-
-```json
-{
-  "direction": "LEFT_IMPLIES_RIGHT"
-}
-```
-
-`type: "NONE"` is the hard-negative label for pairs that should not be related. `PSEUDO` labels are stored separately from gold labels: `/v1/quality/report` excludes them unless `includePseudo=true` is explicitly requested.
-
-This prevents third-party/model confidence from being silently treated as ground truth.
-
-## Matcher quality metrics
+For `IMPLIES`, `THRESHOLD_NESTED`, and `TIME_NESTED`, include `direction`. `type: "NONE"` is the hard-negative gold label. `PSEUDO` labels are excluded from `/v1/quality/report` unless `includePseudo=true` is explicitly requested.
 
 Create/update a label:
 
@@ -124,29 +108,99 @@ curl -X POST http://localhost:3000/v1/quality/labels \
   -d '{"leftId":"polymarket:a","rightId":"kalshi:b","type":"EQUIVALENT","source":"ADJUDICATED"}'
 ```
 
-Inspect unlabeled current predictions:
-
-```bash
-curl 'http://localhost:3000/v1/quality/candidates?unlabeled=true'
-```
-
-Evaluate the current relation graph against gold labels:
+Evaluate the current graph:
 
 ```bash
 curl http://localhost:3000/v1/quality/report
 ```
 
-The report includes:
+The report includes per-type and micro precision/recall/F1 plus `falseArbPredictions` and `falseArbRate`. False-arbitrage precision is the highest-priority matcher metric because false strong relations can create bad guaranteed-payout trades.
 
-- labeled and predicted pair counts;
-- exact relation matches;
-- wrong type/direction count;
-- missing predictions;
-- per-relation precision, recall, and F1;
-- micro precision, recall, and F1;
-- `falseArbPredictions` and `falseArbRate` for strong relation classes capable of producing guaranteed-payout trades.
+## Historical dataset capture
 
-False-arbitrage precision should be treated as the highest-priority matcher metric because a false positive can directly create a bad trade.
+`0.8.0` adds automatic replay-ready capture into a third SQLite database:
+
+```bash
+export PRED_MATCHER_DATASET_DB_PATH='/var/lib/pred-matcher/dataset.sqlite'
+```
+
+Defaults:
+
+```bash
+# Capture every five minutes.
+export PRED_MATCHER_DATASET_CAPTURE_MS=300000
+
+# Keep at most 576 snapshots by default.
+export PRED_MATCHER_DATASET_MAX_SNAPSHOTS=576
+
+# Disable only scheduled capture; manual capture remains available.
+export PRED_MATCHER_DATASET_AUTO_CAPTURE=false
+```
+
+Snapshots contain the normalized market catalog and the relation graph observed at capture time. Storage is content-addressed: unchanged market/relation JSON is stored once in `market_versions` / `relation_versions`, while each snapshot references hashes. Retention deletes old snapshot links and garbage-collects unreferenced versions.
+
+Automatic capture starts after a restored/current sync state is available. Manual capture:
+
+```bash
+curl -X POST http://localhost:3000/v1/dataset/capture
+```
+
+Inspect storage and scheduler status:
+
+```bash
+curl http://localhost:3000/v1/dataset/status
+curl 'http://localhost:3000/v1/dataset/snapshots?limit=100'
+curl 'http://localhost:3000/v1/dataset/frame?id=1'
+```
+
+## Review queue
+
+Every capture runs a wider semantic candidate pass (`minimumCandidateScore=0.20`) and persists pairs worth human review. It does **not** automatically create labels.
+
+Two candidate classes are stored:
+
+- `HARD_NEGATIVE`: retrieval found a plausible pair but the verifier rejected a strong relation, or classified it only as `SIMILAR`.
+- `UNCERTAIN_RELATION`: an arb-eligible relation was emitted below the review-confidence threshold.
+
+The queue also records first/last seen timestamps, observation count, maximum review priority, retrieval score, predicted relation/confidence, titles, and diagnostic reasons.
+
+```bash
+# Unlabeled candidates are the default.
+curl 'http://localhost:3000/v1/dataset/review?limit=100'
+
+curl 'http://localhost:3000/v1/dataset/review?kind=HARD_NEGATIVE&unlabeled=true'
+curl 'http://localhost:3000/v1/dataset/review?kind=UNCERTAIN_RELATION&unlabeled=false'
+```
+
+Adjudication still goes through `POST /v1/quality/labels`; the review queue never promotes a near-miss to `NONE`, `EQUIVALENT`, or another gold label by itself.
+
+## Historical replay
+
+Replay now supports three modes:
+
+- `FIXED_RELATIONS`: hold a supplied/current graph constant and isolate pricing/execution behavior.
+- `REMATCH`: rerun the current candidate retrieval + matcher on every historical frame.
+- `CAPTURED_RELATIONS`: use the relation graph stored with each historical frame, preserving what the matcher believed at that time.
+
+Manual-frame replay remains available through `POST /v1/replay`.
+
+Dataset-backed replay requires no frame upload:
+
+```bash
+curl -X POST http://localhost:3000/v1/dataset/replay \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode":"CAPTURED_RELATIONS",
+    "limit":288,
+    "minimumNetEdge":0,
+    "maxQuoteAgeMs":15000,
+    "includeStale":false
+  }'
+```
+
+Optional `from` and `to` ISO timestamps select a historical window. `limit` is capped at 1000 frames per request.
+
+The replay report includes frame summaries, relation observations/churn, unique opportunities, open/close counts, opportunity sessions, total visible duration, peak net edge/profit, and max profitable size.
 
 ## Settlement feedback
 
@@ -158,58 +212,7 @@ curl -X POST http://localhost:3000/v1/quality/settlements \
   -d '{"marketId":"kalshi:...","outcome":"YES","resolvedAt":"2026-09-16T10:00:00Z"}'
 ```
 
-Supported outcomes: `YES`, `NO`, `INVALID`.
-
-Evaluate current relations against stored settlements:
-
-```bash
-curl http://localhost:3000/v1/quality/settlement-report
-```
-
-Interpretation is intentionally conservative:
-
-- `VIOLATED`: observed outcomes contradict the claimed logical relation; this is strong negative evidence.
-- `CONSISTENT`: observed outcomes do not contradict the relation; this does **not** prove semantic equivalence or implication.
-- `INCONCLUSIVE`: missing/invalid settlement or a relation such as `SIMILAR` with no strict logical settlement constraint.
-
-For `A ⇒ B`, only `A=YES, B=NO` is a violation.
-
-## Historical replay
-
-`POST /v1/replay` accepts ordered or unordered historical market snapshots and replays opportunity detection using each frame's own timestamp for quote freshness.
-
-Two modes are supported:
-
-- `FIXED_RELATIONS`: hold a supplied/current relation graph constant and isolate the pricing/execution engine.
-- `REMATCH`: rerun candidate retrieval + matcher independently on every frame to measure relation churn and end-to-end historical behavior.
-
-Example:
-
-```json
-{
-  "mode": "FIXED_RELATIONS",
-  "frames": [
-    {
-      "capturedAt": "2026-09-16T10:00:00Z",
-      "markets": []
-    }
-  ],
-  "minimumNetEdge": 0,
-  "maxQuoteAgeMs": 15000,
-  "includeStale": false
-}
-```
-
-The replay report includes:
-
-- frame count and per-frame market/relation/opportunity counts;
-- candidate-pair and relation observations in rematch mode;
-- unique relations;
-- opportunity observations and unique opportunities;
-- open/close counts;
-- per-opportunity sessions, first/last seen timestamps, total visible duration, peak net edge/profit, and max profitable size.
-
-A single opportunity ID can have multiple sessions when it disappears and later reopens.
+`GET /v1/quality/settlement-report` reports `CONSISTENT`, `VIOLATED`, or `INCONCLUSIVE`. This is intentionally negative-evidence oriented: a violating realized outcome is strong evidence against a relation; a non-violating outcome does not prove semantic equivalence.
 
 ## Catalog refresh
 
@@ -220,11 +223,9 @@ export PRED_MATCHER_CATALOG_REFRESH_MS=300000
 export PRED_MATCHER_CATALOG_AUTO_REFRESH=true
 ```
 
-A refresh rebuilds the relation graph and REST execution snapshot. If live mode is already active, subscriptions restart against the new relation-relevant market set.
+A refresh rebuilds the relation graph and REST execution snapshot. If live mode is active, subscriptions restart against the new relation-relevant market set.
 
 ## WebSocket sharding
-
-Defaults:
 
 ```bash
 export PRED_MATCHER_POLYMARKET_WS_MARKETS_PER_CONNECTION=250
@@ -253,10 +254,11 @@ Without credentials, Kalshi live mode reports `DEGRADED` and continues to expose
 
 ## Health and observability
 
-- `GET /health`: operational persistence, quality persistence, catalog scheduler, live state, version.
-- `GET /ready`: `200` only after restored/current sync state exists and both SQLite stores are healthy.
-- `GET /metrics`: Prometheus exposition for scanner/runtime metrics.
-- `GET /v1/quality/status`: matcher-quality database status and label/settlement counts.
+- `GET /health`: operational, quality, and dataset persistence status plus catalog/live/capture schedulers.
+- `GET /ready`: `200` only after restored/current sync state exists and all SQLite stores are healthy.
+- `GET /metrics`: Prometheus scanner/runtime metrics.
+- `GET /v1/quality/status`: label/settlement database status.
+- `GET /v1/dataset/status`: historical dataset database + capture scheduler status.
 
 ## Core API
 
@@ -272,7 +274,7 @@ Without credentials, Kalshi live mode reports `DEGRADED` and continues to expose
 - `GET /v1/relations`
 - `GET /v1/opportunities`
 
-## Quality/replay API
+## Quality API
 
 - `GET /v1/quality/status`
 - `GET /v1/quality/labels`
@@ -284,7 +286,14 @@ Without credentials, Kalshi live mode reports `DEGRADED` and continues to expose
 - `GET /v1/quality/settlement-report`
 - `POST /v1/replay`
 
-Replay request bodies are capped at 25 MB; other quality mutations are capped at 2 MB.
+## Dataset API
+
+- `GET /v1/dataset/status`
+- `POST /v1/dataset/capture`
+- `GET /v1/dataset/snapshots?limit=...&from=...&to=...`
+- `GET /v1/dataset/frame?id=...`
+- `GET /v1/dataset/review?limit=...&kind=...&unlabeled=true|false`
+- `POST /v1/dataset/replay`
 
 ## Versioning
 
@@ -297,11 +306,12 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.5.0`: live WebSocket scanner and incremental lifecycle history.
 - `0.6.0`: durable operational state, refresh scheduler, observability, and WS sharding.
 - `0.7.0`: durable relation labels, matcher-quality metrics, settlement feedback, and historical replay.
+- `0.8.0`: automatic deduplicated historical dataset capture, review queues, and captured-relation replay.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
 ## Important limitations
 
-`0.7.0` remains a scanner, not an atomic two-venue execution engine. Replay quality depends on the fidelity and cadence of captured historical books. Settlement consistency is negative-evidence oriented: a non-violating realized outcome cannot prove that two contracts had identical resolution semantics.
+`0.8.0` remains a scanner, not an atomic two-venue execution engine. Historical capture is sampled, not tick-complete, so replay cannot reconstruct opportunities shorter than the capture interval. `CAPTURED_RELATIONS` preserves the relation graph seen at snapshot time but does not prove that a relation was semantically correct.
 
 The SQLite stores are intentionally single-process. Multiple writable replicas sharing one database file are not a supported deployment model; distributed deployment should move the persistence interfaces to a shared transactional database.

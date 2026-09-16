@@ -3,6 +3,9 @@ import { buildContractSpec } from "./core/contract.js";
 import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
 import { CatalogRefresher } from "./service/catalog-refresh.js";
+import { DatasetCaptureScheduler } from "./service/dataset-capture.js";
+import { handleDatasetRequest } from "./service/dataset-api.js";
+import { DatasetRepository } from "./service/dataset-repository.js";
 import { LiveScanner } from "./service/live-scanner.js";
 import { renderPrometheusMetrics } from "./service/metrics.js";
 import { handleQualityRequest } from "./service/quality-api.js";
@@ -11,7 +14,7 @@ import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const STARTED_AT_MS = Date.now();
 
 function configuredPositiveInt(name: string, fallback: number): number {
@@ -35,10 +38,25 @@ function createQualityRepository(): QualityRepository {
   return new QualityRepository(path);
 }
 
+function createDatasetRepository(): DatasetRepository {
+  const path = process.env.PRED_MATCHER_DATASET_DB_PATH?.trim() ||
+    (process.env.NODE_ENV === "test" ? ":memory:" : "./data/pred-matcher-dataset.sqlite");
+  const maxSnapshots = configuredPositiveInt("PRED_MATCHER_DATASET_MAX_SNAPSHOTS", 576);
+  return new DatasetRepository(path, maxSnapshots);
+}
+
 const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
 const store = new MemoryStore(historyLimit, createPersistence());
 const qualityRepository = createQualityRepository();
+const datasetRepository = createDatasetRepository();
 const liveScanner = new LiveScanner(store);
+const datasetCaptureMs = configuredPositiveInt("PRED_MATCHER_DATASET_CAPTURE_MS", 300_000);
+const datasetCaptureScheduler = new DatasetCaptureScheduler(
+  store,
+  datasetRepository,
+  datasetCaptureMs,
+  process.env.PRED_MATCHER_DATASET_AUTO_CAPTURE !== "false"
+);
 let activeSync: Promise<unknown> | undefined;
 
 async function performSync(): Promise<unknown> {
@@ -101,13 +119,16 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "GET" && url.pathname === "/health") {
     const persistence = store.getPersistenceStatus();
     const quality = qualityRepository.status();
-    const healthy = persistence.healthy && quality.healthy;
+    const dataset = datasetRepository.status();
+    const healthy = persistence.healthy && quality.healthy && dataset.healthy;
     json(response, healthy ? 200 : 503, {
       status: healthy ? "ok" : "degraded",
       version: VERSION,
       lastSync: store.getLastSync() ?? null,
       persistence,
       quality,
+      dataset,
+      datasetCapture: datasetCaptureScheduler.getStatus(),
       catalog: catalogRefresher.getStatus(),
       live: liveScanner.getStatus()
     });
@@ -117,12 +138,14 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "GET" && url.pathname === "/ready") {
     const persistence = store.getPersistenceStatus();
     const quality = qualityRepository.status();
-    const ready = Boolean(store.getLastSync()) && persistence.healthy && quality.healthy;
+    const dataset = datasetRepository.status();
+    const ready = Boolean(store.getLastSync()) && persistence.healthy && quality.healthy && dataset.healthy;
     json(response, ready ? 200 : 503, {
       ready,
       restoredOrSynced: Boolean(store.getLastSync()),
       persistenceHealthy: persistence.healthy,
-      qualityPersistenceHealthy: quality.healthy
+      qualityPersistenceHealthy: quality.healthy,
+      datasetPersistenceHealthy: dataset.healthy
     });
     return;
   }
@@ -270,6 +293,15 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
 
   if (await handleQualityRequest(request, response, url, store, qualityRepository)) return;
+  if (await handleDatasetRequest(
+    request,
+    response,
+    url,
+    store,
+    qualityRepository,
+    datasetRepository,
+    datasetCaptureScheduler
+  )) return;
 
   json(response, 404, { error: "not_found" });
 }
@@ -286,10 +318,12 @@ export function createAppServer() {
 async function initializeRuntime(): Promise<void> {
   const autoLive = process.env.PRED_MATCHER_LIVE_AUTO_START === "true";
   const autoCatalog = process.env.PRED_MATCHER_CATALOG_AUTO_REFRESH !== "false";
+  const autoDataset = process.env.PRED_MATCHER_DATASET_AUTO_CAPTURE !== "false";
 
   if (autoCatalog) catalogRefresher.start(false);
-  if (!store.getLastSync() && (autoCatalog || autoLive)) await performSync();
+  if (!store.getLastSync() && (autoCatalog || autoLive || autoDataset)) await performSync();
   if (autoLive && store.getLastSync()) await liveScanner.start();
+  if (autoDataset) datasetCaptureScheduler.start(true);
 }
 
 if (process.env.NODE_ENV !== "test") {
@@ -301,10 +335,12 @@ if (process.env.NODE_ENV !== "test") {
     if (shuttingDown) return;
     shuttingDown = true;
     catalogRefresher.stop();
+    datasetCaptureScheduler.stop();
     liveScanner.stop();
     server.close(() => {
       store.close();
       qualityRepository.close();
+      datasetRepository.close();
     });
   };
 
