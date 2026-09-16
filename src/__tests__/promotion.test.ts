@@ -38,7 +38,7 @@ function dataset(count = 100): { labels: RelationLabel[]; observations: ShadowVe
       provider: "fixture",
       model: POLICY.model,
       promptVersion: POLICY.promptVersion,
-      observedAt: `2026-09-16T11:${String(index).padStart(2, "0")}:00Z`,
+      observedAt: new Date(Date.UTC(2026, 8, 16, 11, 0, index)).toISOString(),
       pairKey: relationPairKey(leftId, rightId),
       leftId,
       rightId,
@@ -55,6 +55,21 @@ function dataset(count = 100): { labels: RelationLabel[]; observations: ShadowVe
 
 function market(id: string, venue: "polymarket" | "kalshi"): NormalizedMarket {
   return { id: `${venue}:${id}`, venue, externalId: id, title: `Contract ${id}`, prices: {} };
+}
+
+function relationFixtures(): { markets: NormalizedMarket[]; relations: MarketRelation[] } {
+  return {
+    markets: [
+      market("p1", "polymarket"), market("k1", "kalshi"),
+      market("p2", "polymarket"), market("k2", "kalshi"),
+      market("p3", "polymarket"), market("k3", "kalshi")
+    ],
+    relations: [
+      { leftId: "polymarket:p1", rightId: "kalshi:k1", type: "EQUIVALENT", confidence: 0.9, evidence: [] },
+      { leftId: "polymarket:p2", rightId: "kalshi:k2", type: "EQUIVALENT", confidence: 0.9, evidence: [] },
+      { leftId: "polymarket:p3", rightId: "kalshi:k3", type: "SIMILAR", confidence: 0.7, evidence: [] }
+    ]
+  };
 }
 
 describe("semantic promotion gate", () => {
@@ -110,16 +125,7 @@ describe("SemanticVetoService", () => {
       maximumRelations: 10,
       minimumSemanticConfidence: 0.8
     });
-    const markets = [
-      market("p1", "polymarket"), market("k1", "kalshi"),
-      market("p2", "polymarket"), market("k2", "kalshi"),
-      market("p3", "polymarket"), market("k3", "kalshi")
-    ];
-    const relations: MarketRelation[] = [
-      { leftId: "polymarket:p1", rightId: "kalshi:k1", type: "EQUIVALENT", confidence: 0.9, evidence: [] },
-      { leftId: "polymarket:p2", rightId: "kalshi:k2", type: "EQUIVALENT", confidence: 0.9, evidence: [] },
-      { leftId: "polymarket:p3", rightId: "kalshi:k3", type: "SIMILAR", confidence: 0.7, evidence: [] }
-    ];
+    const { markets, relations } = relationFixtures();
 
     const result = await service.apply(markets, relations);
     expect(result?.checkedRelations).toBe(2);
@@ -127,5 +133,32 @@ describe("SemanticVetoService", () => {
     expect(result?.vetoedRelations).toBe(1);
     expect(result?.relations.map((relation) => relation.type)).toEqual(["EQUIVALENT", "SIMILAR"]);
     expect(result?.relations.some((relation) => relation.leftId === "polymarket:p2")).toBe(false);
+  });
+
+  it("fails closed before calling the verifier when promotion is not eligible", async () => {
+    const { labels, observations } = dataset(20);
+    const promotion = evaluateSemanticPromotion(observations, labels, POLICY, 1);
+    let calls = 0;
+    const verifier: SemanticVerifier = {
+      provider: "fixture",
+      model: POLICY.model,
+      promptVersion: POLICY.promptVersion,
+      async verify() {
+        calls += 1;
+        return [];
+      }
+    };
+    const service = new SemanticVetoService(verifier, { evaluate: () => promotion }, {
+      mode: "VETO_ONLY",
+      batchSize: 10,
+      maximumRelations: 10,
+      minimumSemanticConfidence: 0.8
+    });
+    const { markets, relations } = relationFixtures();
+
+    await expect(service.apply(markets, relations)).rejects.toMatchObject({
+      code: "semantic_promotion_gate_not_passed"
+    });
+    expect(calls).toBe(0);
   });
 });
