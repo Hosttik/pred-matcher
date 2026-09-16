@@ -5,6 +5,7 @@ import { fetchPolymarketMarkets } from "../adapters/polymarket.js";
 import { matchMarkets } from "../core/matcher.js";
 import { findOpportunities } from "../core/opportunities.js";
 import type { MarketRelation, NormalizedMarket, SyncResult } from "../core/types.js";
+import type { SemanticVetoService } from "./semantic-veto.js";
 import { MemoryStore } from "./store.js";
 
 function opportunityMarketIds(relations: readonly MarketRelation[]): Set<string> {
@@ -17,7 +18,10 @@ function opportunityMarketIds(relations: readonly MarketRelation[]): Set<string>
   return ids;
 }
 
-export async function syncAll(store: MemoryStore): Promise<SyncResult> {
+export async function syncAll(
+  store: MemoryStore,
+  semanticVeto?: SemanticVetoService
+): Promise<SyncResult> {
   const [polymarketResult, kalshiResult] = await Promise.allSettled([
     fetchPolymarketMarkets(),
     fetchKalshiMarkets()
@@ -31,7 +35,9 @@ export async function syncAll(store: MemoryStore): Promise<SyncResult> {
   }
 
   const markets: NormalizedMarket[] = [...polymarket, ...kalshi];
-  const { candidatePairs, relations } = matchMarkets(markets);
+  const matched = matchMarkets(markets);
+  const semantic = await semanticVeto?.apply(markets, matched.relations);
+  const relations = semantic?.relations ?? matched.relations;
   const relevantIds = opportunityMarketIds(relations);
   const withPolymarketDepth = await hydratePolymarketOrderBooks(markets, relevantIds);
   const hydratedMarkets = await hydrateKalshiExecutionData(withPolymarketDepth, relevantIds);
@@ -42,9 +48,22 @@ export async function syncAll(store: MemoryStore): Promise<SyncResult> {
   const result: SyncResult = {
     fetched: { polymarket: polymarket.length, kalshi: kalshi.length },
     totalMarkets: hydratedMarkets.length,
-    candidatePairs,
+    candidatePairs: matched.candidatePairs,
     relations: relations.length,
     opportunities: opportunities.length,
+    ...(semantic ? {
+      semanticPolicy: {
+        mode: "VETO_ONLY",
+        gateEligible: true,
+        model: semantic.model,
+        promptVersion: semantic.promptVersion,
+        checkedRelations: semantic.checkedRelations,
+        vetoedRelations: semantic.vetoedRelations,
+        confirmedRelations: semantic.confirmedRelations,
+        requests: semantic.usage.requests,
+        estimatedCostUsd: semantic.usage.estimatedCostUsd
+      }
+    } : {}),
     syncedAt: new Date().toISOString()
   };
 
