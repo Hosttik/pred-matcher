@@ -2,7 +2,7 @@
 
 Durable prediction-market semantic matcher and executable-opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.13.0**.
+Current version: **0.14.0**.
 
 ## Scope
 
@@ -15,7 +15,7 @@ Current version: **0.13.0**.
 - OpenAI semantic verifier in observational shadow mode.
 - Historical multi-model A/B with prompt/model/matcher versioning, usage/cost accounting, and disagreement review.
 - Statistical semantic promotion gate.
-- Controlled production rollout with `DRY_RUN`, `ENFORCED`, opportunity-impact accounting, and a latching circuit breaker.
+- Controlled production rollout with `DRY_RUN`, `AUTO`, `ENFORCED`, durable rollout evidence, opportunity-impact accounting, and a latching circuit breaker.
 
 ## Requirements
 
@@ -57,6 +57,11 @@ GET  /v1/relations
 GET  /v1/opportunities
 GET  /v1/history
 GET  /v1/semantic/status
+GET  /v1/semantic/evidence
+GET  /v1/semantic/events
+GET  /v1/semantic/decisions
+GET  /v1/semantic/cohorts
+GET  /v1/semantic/attribution
 POST /v1/semantic/circuit/reset
 ```
 
@@ -132,7 +137,7 @@ curl http://localhost:3000/v1/shadow/report
 
 The verifier receives contract-semantic fields only: IDs, venue, title/subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. OpenAI Responses requests use `store: false`, and runtime API-key traffic is fixed to `https://api.openai.com/v1`.
 
-The OpenAI prompt is versioned as `semantic-contract-v1`. New shadow observations also store the deterministic matcher version (`heuristic-v1` in `0.13.0`). Matcher-version provenance is separate from the package version: any future semantic matcher change must bump that matcher version before promotion evidence can be reused.
+The OpenAI prompt is versioned as `semantic-contract-v1`. New shadow observations also store the deterministic matcher version (`heuristic-v1`). Matcher-version provenance is separate from the package version: any future semantic matcher change must bump that matcher version before promotion evidence can be reused.
 
 ## Historical shadow A/B
 
@@ -201,15 +206,16 @@ export PRED_MATCHER_PROMOTION_MIN_SEMANTIC_CONFIDENCE=0.80
 export PRED_MATCHER_PROMOTION_CONFIDENCE_Z=1.96
 ```
 
-Because `0.13.0` introduces matcher-version pinning, historical runs created before `0.13.0` do not satisfy the new promotion gate. Run a new `shadow:backfill` to generate matcher-pinned evidence before enabling enforcement.
+Historical runs created before matcher-version provenance was introduced do not satisfy the current promotion gate. Run a fresh `shadow:backfill` before enabling semantic production rollout.
 
-## Controlled veto rollout — v0.13.0
+## Controlled veto rollout
 
-Three rollout modes are supported:
+Four rollout modes are supported:
 
 - `OFF`: deterministic matcher only; no semantic production call.
 - `DRY_RUN`: run semantic veto and compute what it would suppress, but persist the original deterministic relation graph and opportunities.
-- `ENFORCED`: apply semantic veto only while the promotion gate is eligible and the circuit breaker remains closed.
+- `AUTO`: behave as `DRY_RUN` until a configured number of consecutive safe semantic syncs has been observed, then automatically transition to `ENFORCED`.
+- `ENFORCED`: apply semantic veto while promotion and runtime guards remain safe.
 
 The legacy value `PRED_MATCHER_SEMANTIC_MODE=VETO_ONLY` remains a backward-compatible alias for `ENFORCED`.
 
@@ -222,13 +228,12 @@ export PRED_MATCHER_PROMOTED_MODEL='gpt-5.6-luna'
 export PRED_MATCHER_PROMOTED_PROMPT_VERSION='semantic-contract-v1'
 export PRED_MATCHER_PROMOTED_MATCHER_VERSION='heuristic-v1'
 
-export PRED_MATCHER_SEMANTIC_MODE=DRY_RUN
-curl -X POST http://localhost:3000/v1/sync
-curl http://localhost:3000/v1/semantic/status
-
-# After reviewing dry-run impact and a passing promotion report:
-export PRED_MATCHER_SEMANTIC_MODE=ENFORCED
+# Automatic DRY_RUN -> ENFORCED after 12 consecutive safe syncs.
+export PRED_MATCHER_SEMANTIC_MODE=AUTO
+export PRED_MATCHER_AUTO_PROMOTION_SAFE_SYNCS=12
 ```
+
+A sync counts toward the safe streak only when the formal promotion gate is eligible, the provider response is valid, veto rate stays within bounds, candidate opportunities are monotonic, and opportunity retention stays above the configured floor. An unsafe sync resets the streak to zero. The streak is persisted in `SyncResult`, survives restart only when model/prompt/matcher pins still match, and a circuit reset also clears it.
 
 Every semantic sync records baseline-vs-candidate opportunity impact:
 
@@ -251,7 +256,7 @@ The semantic policy is monotonic by design: it can retain or remove heuristic ar
 
 ### Circuit breaker
 
-`ENFORCED` automatically rolls back to the deterministic baseline and latches the circuit open when any enforcement guard fails, including:
+`ENFORCED`, including an `AUTO` rollout after promotion, automatically rolls back to the deterministic baseline and latches the circuit open when any enforcement guard fails, including:
 
 - promotion evidence expires or becomes ineligible after new adjudication;
 - model/prompt/matcher pin mismatch;
@@ -271,11 +276,29 @@ curl -X POST http://localhost:3000/v1/semantic/circuit/reset
 curl -X POST http://localhost:3000/v1/sync
 ```
 
-The reset alone does not prove the next sync safe. In `ENFORCED`, the following sync still has to pass all promotion and runtime guards before the semantic candidate becomes effective.
+The reset alone does not prove the next sync safe. `ENFORCED` must pass all guards again; `AUTO` starts a new safe streak.
+
+## Production rollout evidence — v0.14.0
+
+Every non-`OFF` semantic sync writes durable evidence to the quality SQLite database before the production snapshot is replaced. The evidence includes requested/effective mode, promotion eligibility, safe streak, circuit state, veto rate, opportunity impact, and one `CONFIRMED`/`VETOED` record per checked arb relation.
+
+Inspect the time series and transitions:
+
+```bash
+curl 'http://localhost:3000/v1/semantic/evidence?limit=100'
+curl 'http://localhost:3000/v1/semantic/events?limit=500'
+curl 'http://localhost:3000/v1/semantic/decisions?action=VETOED&limit=1000'
+curl 'http://localhost:3000/v1/semantic/cohorts?limit=5000'
+curl 'http://localhost:3000/v1/semantic/attribution?limit=5000'
+```
+
+`/v1/semantic/events` derives operational transitions such as `AUTO_PROMOTED`, enforcement start/stop, circuit open/reset, and safe-streak reset. Cohorts break decisions down by relation type and venue pair.
+
+Attribution is deliberately conservative. `MANUAL`/`ADJUDICATED` labels can classify a veto as `CORRECT_VETO_BY_LABEL` or `FALSE_VETO_BY_LABEL`. Settlement outcomes can provide strong falsification evidence (`PREVENTED_SETTLEMENT_VIOLATION`) but a consistent settlement only means `NOT_FALSIFIED_BY_SETTLEMENT`; one matching outcome does not prove that two contracts were logically equivalent or that an implication was valid in general.
 
 ## Observability
 
-`GET /metrics` includes semantic rollout gauges for requested/effective mode, circuit state, veto rate, opportunity retention, and suppressed opportunity count.
+`GET /metrics` includes semantic rollout gauges for requested/effective mode, circuit state, safe streak, AUTO promotion progress, last-sync auto-promotion transition, veto rate, opportunity retention, and suppressed opportunity count.
 
 `GET /health` includes current app version, matcher version, semantic status, promotion evidence status, and circuit state.
 
@@ -312,6 +335,7 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.11.0`: historical shadow backfill, model A/B, prompt versioning, usage/cost accounting, disagreement review.
 - `0.12.0`: statistical semantic promotion gate and opt-in semantic veto policy.
 - `0.13.0`: matcher-pinned/expiring promotion evidence, dry-run vs enforced rollout, opportunity-impact accounting, and latching circuit breaker.
+- `0.14.0`: durable rollout evidence, `AUTO` safe-streak promotion, transition events, cohort analytics, and conservative post-settlement veto attribution.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
@@ -319,7 +343,7 @@ Backward-compatible features increment `MINOR` while pre-1.0; bug fixes incremen
 
 This remains a scanner, not an atomic two-venue execution engine. Cross-venue fills can race and settlement/venue risk remains.
 
-Historical capture is sampled rather than tick-complete. Promotion quality is bounded by adjudicated-label coverage and historical representativeness. A passing statistical gate reduces measured risk; it does not prove semantic correctness.
+Historical capture is sampled rather than tick-complete. Promotion quality is bounded by adjudicated-label coverage and historical representativeness. A passing statistical gate and a safe rollout streak reduce measured risk; neither proves semantic correctness.
 
 Semantic veto can only reduce the heuristic arb set. It cannot discover opportunities the deterministic matcher missed. When the circuit opens, production intentionally returns to that deterministic baseline.
 
