@@ -51,6 +51,24 @@ export interface SemanticRolloutCohort {
   suppressedOpportunities: number;
 }
 
+export type SemanticRolloutEventType =
+  | "AUTO_PROMOTED"
+  | "ENFORCEMENT_STARTED"
+  | "ENFORCEMENT_STOPPED"
+  | "CIRCUIT_OPENED"
+  | "CIRCUIT_RESET_OBSERVED"
+  | "SAFE_STREAK_RESET";
+
+export interface SemanticRolloutEvent {
+  type: SemanticRolloutEventType;
+  evidenceId: string;
+  occurredAt: string;
+  requestedMode: Exclude<SemanticRolloutMode, "OFF">;
+  effectiveMode: "DRY_RUN" | "ENFORCED";
+  safeStreak: number;
+  reasons: string[];
+}
+
 export type SemanticVetoAttribution =
   | "CORRECT_VETO_BY_LABEL"
   | "FALSE_VETO_BY_LABEL"
@@ -101,6 +119,33 @@ export function cohortRolloutDecisions(
       suppressedOpportunities: values.filter((value) => value.suppressedOpportunity).length
     };
   }).sort((a, b) => b.decisions - a.decisions || a.relationType.localeCompare(b.relationType));
+}
+
+export function deriveRolloutEvents(evidence: readonly SemanticRolloutEvidence[]): SemanticRolloutEvent[] {
+  const ordered = [...evidence].sort((a, b) => a.syncedAt.localeCompare(b.syncedAt));
+  const events: SemanticRolloutEvent[] = [];
+  let previous: SemanticRolloutEvidence | undefined;
+  const push = (type: SemanticRolloutEventType, item: SemanticRolloutEvidence): void => {
+    events.push({
+      type,
+      evidenceId: item.evidenceId,
+      occurredAt: item.syncedAt,
+      requestedMode: item.requestedMode,
+      effectiveMode: item.effectiveMode,
+      safeStreak: item.safeStreak,
+      reasons: item.guardReasons
+    });
+  };
+  for (const item of ordered) {
+    if (item.autoPromotedThisSync) push("AUTO_PROMOTED", item);
+    if (item.effectiveMode === "ENFORCED" && previous?.effectiveMode !== "ENFORCED") push("ENFORCEMENT_STARTED", item);
+    if (item.effectiveMode === "DRY_RUN" && previous?.effectiveMode === "ENFORCED") push("ENFORCEMENT_STOPPED", item);
+    if (item.circuitOpen && !previous?.circuitOpen) push("CIRCUIT_OPENED", item);
+    if (!item.circuitOpen && previous?.circuitOpen) push("CIRCUIT_RESET_OBSERVED", item);
+    if (item.safeStreak === 0 && (previous?.safeStreak ?? 0) > 0) push("SAFE_STREAK_RESET", item);
+    previous = item;
+  }
+  return events.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
 }
 
 export function attributeVetoDecisions(
