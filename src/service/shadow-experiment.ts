@@ -22,7 +22,6 @@ import type { DatasetRepository } from "./dataset-repository.js";
 import type { QualityRepository } from "./quality-repository.js";
 
 const ARB_ELIGIBLE = new Set<RelationType>(["EQUIVALENT", "THRESHOLD_NESTED", "TIME_NESTED", "IMPLIES"]);
-
 type Candidate = ReturnType<typeof generateCandidates>[number];
 
 interface SelectedCandidate {
@@ -62,8 +61,8 @@ function compareModels(
       const leftModel = models[leftIndex];
       const rightModel = models[rightIndex];
       if (!leftModel || !rightModel) continue;
-      const left = decisionsByModel.get(leftModel) ?? new Map();
-      const right = decisionsByModel.get(rightModel) ?? new Map();
+      const left = decisionsByModel.get(leftModel) ?? new Map<string, SemanticVerifierDecision>();
+      const right = decisionsByModel.get(rightModel) ?? new Map<string, SemanticVerifierDecision>();
       let comparedPairs = 0;
       let disagreements = 0;
       for (const [pairKey, leftDecision] of left) {
@@ -116,13 +115,12 @@ function buildReviewCandidates(
       : modelDisagreement
         ? "MODEL_DISAGREEMENT"
         : "HEURISTIC_DISAGREEMENT";
-    const priority = (goldMismatch ? 4 : modelDisagreement ? 3 : 2) + item.candidate.score;
     review.push({
       experimentId,
       pairKey,
       leftId: item.candidate.left.id,
       rightId: item.candidate.right.id,
-      priority: Number(priority.toFixed(6)),
+      priority: Number(((goldMismatch ? 4 : modelDisagreement ? 3 : 2) + item.candidate.score).toFixed(6)),
       reason,
       heuristicSignature: heuristic,
       modelSignatures,
@@ -156,16 +154,15 @@ export class ShadowExperimentRunner {
       retrievedPairs += candidates.length;
       for (const candidate of candidates) {
         const heuristic = classifyCandidate(candidate);
-        const selected = { candidate, heuristic, priority: candidatePriority(candidate, heuristic) };
+        const item = { candidate, heuristic, priority: candidatePriority(candidate, heuristic) };
         const key = relationPairKey(candidate.left.id, candidate.right.id);
         const existing = selectedByPair.get(key);
-        if (!existing || selected.priority >= existing.priority) selectedByPair.set(key, selected);
+        if (!existing || item.priority >= existing.priority) selectedByPair.set(key, item);
       }
     }
-    const selected = [...selectedByPair.values()]
-      .sort((a, b) => b.priority - a.priority)
-      .slice(0, options.maxPairs);
+    const selected = [...selectedByPair.values()].sort((a, b) => b.priority - a.priority).slice(0, options.maxPairs);
     if (selected.length === 0) throw new Error("shadow_experiment_no_candidates");
+    const selectedKeys = new Set(selected.map(({ candidate }) => relationPairKey(candidate.left.id, candidate.right.id)));
 
     const experimentId = randomUUID();
     const promptVersions = [...new Set(this.verifiers.map((verifier) => verifier.promptVersion ?? "unversioned"))];
@@ -185,7 +182,9 @@ export class ShadowExperimentRunner {
     };
     this.qualityRepository.upsertShadowExperiment(experiment);
 
-    const labels = this.qualityRepository.listLabels().filter((label) => selectedByPair.has(relationPairKey(label.leftId, label.rightId)));
+    const labels = this.qualityRepository.listLabels().filter((label) => (
+      label.source !== "PSEUDO" && selectedKeys.has(relationPairKey(label.leftId, label.rightId))
+    ));
     const heuristicPredictions = selected.flatMap(({ heuristic }) => heuristic ? [heuristic] : []);
     const decisionsByModel = new Map<string, Map<string, SemanticVerifierDecision>>();
     const runIds: string[] = [];
@@ -242,12 +241,15 @@ export class ShadowExperimentRunner {
           run = { ...run, verifiedPairs: decisions.length, usage };
           this.qualityRepository.upsertShadowRun(run);
         }
+
         const shadowPredictions = decisions.flatMap((decision) => {
           const relation = semanticDecisionToRelation(decision);
           return relation ? [relation] : [];
         });
         const heuristicByPair = new Map(selected.map(({ candidate, heuristic }) => [relationPairKey(candidate.left.id, candidate.right.id), heuristic]));
-        const disagreements = decisions.filter((decision) => semanticDecisionSignature(decision) !== heuristicSignature(heuristicByPair.get(decision.pairKey))).length;
+        const disagreements = decisions.filter((decision) => (
+          semanticDecisionSignature(decision) !== heuristicSignature(heuristicByPair.get(decision.pairKey))
+        )).length;
         run = {
           ...run,
           status: "COMPLETED",
@@ -265,7 +267,14 @@ export class ShadowExperimentRunner {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         errors.push(`${verifier.model}:${message}`);
-        run = { ...run, status: "FAILED", completedAt: new Date().toISOString(), verifiedPairs: decisions.length, usage, error: message.slice(0, 2_000) };
+        run = {
+          ...run,
+          status: "FAILED",
+          completedAt: new Date().toISOString(),
+          verifiedPairs: decisions.length,
+          usage,
+          error: message.slice(0, 2_000)
+        };
         this.qualityRepository.upsertShadowRun(run);
         if (decisions.length > 0) decisionsByModel.set(verifier.model, new Map(decisions.map((decision) => [decision.pairKey, decision])));
         totalUsage = mergeSemanticVerifierUsage(totalUsage, usage);
@@ -275,10 +284,9 @@ export class ShadowExperimentRunner {
     const comparisons = compareModels(models, decisionsByModel);
     const review = buildReviewCandidates(experimentId, selected, models, decisionsByModel, labels);
     this.qualityRepository.upsertShadowReviewCandidates(review);
-    const status = completedRuns === this.verifiers.length ? "COMPLETED" : completedRuns > 0 ? "PARTIAL" : "FAILED";
     experiment = {
       ...experiment,
-      status,
+      status: completedRuns === this.verifiers.length ? "COMPLETED" : completedRuns > 0 ? "PARTIAL" : "FAILED",
       completedAt: new Date().toISOString(),
       runIds,
       comparisons,
