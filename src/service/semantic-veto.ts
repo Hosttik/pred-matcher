@@ -37,12 +37,15 @@ export interface SemanticVetoOptions {
   minimumSemanticConfidence: number;
   maximumVetoRate: number;
   minimumOpportunityRetentionRate: number;
+  autoPromotionRequiredSyncs: number;
+  initialSafeStreak?: number;
+  initialAutoPromoted?: boolean;
   initialCircuit?: Omit<SemanticCircuitBreakerState, "trippedThisSync">;
 }
 
 export interface SemanticVetoStatus {
   requestedMode: SemanticProductionMode;
-  effectiveMode: SemanticProductionMode;
+  effectiveMode: "OFF" | "DRY_RUN" | "ENFORCED";
   configured: boolean;
   model?: string;
   promptVersion?: string;
@@ -55,11 +58,20 @@ export interface SemanticVetoStatus {
   maximumRelations: number;
   maximumVetoRate: number;
   minimumOpportunityRetentionRate: number;
+  autoPromotionRequiredSyncs: number;
+  safeStreak: number;
+  autoPromoted: boolean;
   circuitBreaker: Omit<SemanticCircuitBreakerState, "trippedThisSync">;
+}
+
+export interface SemanticVetoRelationDecision {
+  relation: MarketRelation;
+  action: "CONFIRMED" | "VETOED";
 }
 
 export interface SemanticVetoEvaluation {
   proposedRelations: MarketRelation[];
+  decisions: SemanticVetoRelationDecision[];
   promotion: SemanticPromotionReport;
   gateEligible: boolean;
   guardReasons: string[];
@@ -77,6 +89,9 @@ export interface SemanticVetoEvaluation {
 export interface SemanticRolloutDecision {
   effectiveMode: "DRY_RUN" | "ENFORCED";
   guardReasons: string[];
+  safe: boolean;
+  safeStreak: number;
+  autoPromotedThisSync: boolean;
   circuitBreaker: SemanticCircuitBreakerState;
 }
 
@@ -88,6 +103,10 @@ export class SemanticVetoError extends Error {
 
 function positiveInt(value: number, fallback: number, max: number): number {
   return Number.isInteger(value) && value > 0 ? Math.min(value, max) : fallback;
+}
+
+function nonNegativeInt(value: number | undefined): number {
+  return value !== undefined && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 function probability(value: number, fallback: number): number {
@@ -107,6 +126,8 @@ export class SemanticVetoService {
   private circuitOpen = false;
   private circuitReasons: string[] = [];
   private circuitOpenedAt: string | undefined;
+  private safeStreak: number;
+  private autoPromoted: boolean;
 
   constructor(
     private readonly verifier: SemanticVerifier | undefined,
@@ -120,12 +141,18 @@ export class SemanticVetoService {
       minimumSemanticConfidence: probability(options.minimumSemanticConfidence, 0.8),
       maximumVetoRate: probability(options.maximumVetoRate, 0.35),
       minimumOpportunityRetentionRate: probability(options.minimumOpportunityRetentionRate, 0.5),
+      autoPromotionRequiredSyncs: positiveInt(options.autoPromotionRequiredSyncs, 12, 10_000),
+      ...(options.initialSafeStreak !== undefined ? { initialSafeStreak: nonNegativeInt(options.initialSafeStreak) } : {}),
+      ...(options.initialAutoPromoted !== undefined ? { initialAutoPromoted: options.initialAutoPromoted } : {}),
       ...(options.initialCircuit ? { initialCircuit: options.initialCircuit } : {})
     };
+    this.safeStreak = nonNegativeInt(options.initialSafeStreak);
+    this.autoPromoted = options.initialAutoPromoted === true;
     if (options.initialCircuit?.open) {
       this.circuitOpen = true;
       this.circuitReasons = [...new Set(options.initialCircuit.reasons)];
       this.circuitOpenedAt = options.initialCircuit.openedAt;
+      this.autoPromoted = false;
     }
   }
 
@@ -142,10 +169,15 @@ export class SemanticVetoService {
     );
   }
 
+  private shouldFailBack(): boolean {
+    return this.options.mode === "ENFORCED" || (this.options.mode === "AUTO" && this.autoPromoted);
+  }
+
   private openCircuit(reasons: readonly string[]): boolean {
     if (reasons.length === 0) return false;
     const wasOpen = this.circuitOpen;
     this.circuitOpen = true;
+    this.autoPromoted = false;
     this.circuitReasons = [...new Set([...this.circuitReasons, ...reasons])];
     if (!this.circuitOpenedAt) this.circuitOpenedAt = new Date().toISOString();
     return !wasOpen;
@@ -164,6 +196,8 @@ export class SemanticVetoService {
     this.circuitOpen = false;
     this.circuitReasons = [];
     this.circuitOpenedAt = undefined;
+    this.autoPromoted = false;
+    this.safeStreak = 0;
     return this.getStatus();
   }
 
@@ -172,11 +206,11 @@ export class SemanticVetoService {
     const pinned = this.pinsMatch(promotion);
     const promotionEligible = pinned && promotion.eligible;
     const requestedMode = this.options.mode;
-    const effectiveMode: SemanticProductionMode = requestedMode === "OFF"
+    const effectiveMode: "OFF" | "DRY_RUN" | "ENFORCED" = requestedMode === "OFF"
       ? "OFF"
-      : requestedMode === "DRY_RUN"
-        ? "DRY_RUN"
-        : !this.circuitOpen && promotionEligible
+      : requestedMode === "ENFORCED"
+        ? (!this.circuitOpen && promotionEligible ? "ENFORCED" : "DRY_RUN")
+        : requestedMode === "AUTO" && this.autoPromoted && !this.circuitOpen && promotionEligible
           ? "ENFORCED"
           : "DRY_RUN";
     return {
@@ -196,6 +230,9 @@ export class SemanticVetoService {
       maximumRelations: this.options.maximumRelations,
       maximumVetoRate: this.options.maximumVetoRate,
       minimumOpportunityRetentionRate: this.options.minimumOpportunityRetentionRate,
+      autoPromotionRequiredSyncs: this.options.autoPromotionRequiredSyncs,
+      safeStreak: this.safeStreak,
+      autoPromoted: this.autoPromoted,
       circuitBreaker: {
         open: this.circuitOpen,
         reasons: [...this.circuitReasons],
@@ -212,6 +249,7 @@ export class SemanticVetoService {
   ): SemanticVetoEvaluation {
     return {
       proposedRelations: [...relations],
+      decisions: [],
       promotion,
       gateEligible: this.pinsMatch(promotion) && promotion.eligible,
       guardReasons: reasons,
@@ -240,21 +278,21 @@ export class SemanticVetoService {
       ? promotion.reasons
       : [...promotion.reasons, "runtime_model_prompt_or_matcher_not_pinned"];
 
-    if (this.options.mode === "ENFORCED" && !gateEligible) {
+    if (this.shouldFailBack() && !gateEligible) {
       const reasons = ["promotion_gate_not_eligible", ...promotionReasons];
       this.openCircuit(reasons);
       return this.skippedEvaluation(relations, promotion, reasons);
     }
     if (!this.verifier) {
       const reasons = ["semantic_provider_not_configured"];
-      if (this.options.mode === "ENFORCED") this.openCircuit(reasons);
+      if (this.shouldFailBack()) this.openCircuit(reasons);
       return this.skippedEvaluation(relations, promotion, reasons, "semantic_provider_not_configured");
     }
 
     const arbRelations = relations.filter((relation) => ARB_ELIGIBLE.has(relation.type));
     if (arbRelations.length > this.options.maximumRelations) {
       const reason = `semantic_relation_limit_exceeded:${arbRelations.length}>${this.options.maximumRelations}`;
-      if (this.options.mode === "ENFORCED") this.openCircuit([reason]);
+      if (this.shouldFailBack()) this.openCircuit([reason]);
       return this.skippedEvaluation(relations, promotion, [reason]);
     }
 
@@ -305,7 +343,7 @@ export class SemanticVetoService {
     } catch (error) {
       const message = errorMessage(error).slice(0, 2_000);
       const reason = `semantic_provider_error:${message}`;
-      if (this.options.mode === "ENFORCED") this.openCircuit([reason]);
+      if (this.shouldFailBack()) this.openCircuit([reason]);
       return {
         ...this.skippedEvaluation(relations, promotion, [reason], message),
         usage
@@ -317,12 +355,17 @@ export class SemanticVetoService {
       return confirmed.has(relationPairKey(relation.leftId, relation.rightId));
     });
     const vetoedRelations = arbRelations.length - confirmed.size;
-    const guardReasons = this.options.mode === "DRY_RUN" && !gateEligible
+    const guardReasons = !gateEligible
       ? ["promotion_gate_not_eligible_for_enforcement", ...promotionReasons]
       : [];
+    const decisions: SemanticVetoRelationDecision[] = arbRelations.map((relation) => ({
+      relation,
+      action: confirmed.has(relationPairKey(relation.leftId, relation.rightId)) ? "CONFIRMED" : "VETOED"
+    }));
 
     return {
       proposedRelations,
+      decisions,
       promotion,
       gateEligible,
       guardReasons,
@@ -358,14 +401,40 @@ export class SemanticVetoService {
       );
     }
 
+    const uniqueReasons = [...new Set(guardReasons)];
+    const safe = evaluation.gateEligible && uniqueReasons.length === 0 && !evaluation.providerError;
+    this.safeStreak = safe ? this.safeStreak + 1 : 0;
+    let autoPromotedThisSync = false;
     let trippedThisSync = false;
-    if (this.options.mode === "ENFORCED" && guardReasons.length > 0) {
-      trippedThisSync = this.openCircuit(guardReasons);
+
+    if (this.options.mode === "ENFORCED" && !safe) {
+      trippedThisSync = this.openCircuit(uniqueReasons.length > 0 ? uniqueReasons : ["semantic_rollout_unsafe"]);
     }
-    const effectiveMode = this.options.mode === "ENFORCED" && !this.circuitOpen ? "ENFORCED" : "DRY_RUN";
+    if (this.options.mode === "AUTO") {
+      if (this.autoPromoted && !safe) {
+        trippedThisSync = this.openCircuit(uniqueReasons.length > 0 ? uniqueReasons : ["semantic_rollout_unsafe"]);
+      } else if (
+        !this.autoPromoted &&
+        !this.circuitOpen &&
+        safe &&
+        this.safeStreak >= this.options.autoPromotionRequiredSyncs
+      ) {
+        this.autoPromoted = true;
+        autoPromotedThisSync = true;
+      }
+    }
+
+    const effectiveMode = (
+      (this.options.mode === "ENFORCED" && safe && !this.circuitOpen) ||
+      (this.options.mode === "AUTO" && this.autoPromoted && safe && !this.circuitOpen)
+    ) ? "ENFORCED" : "DRY_RUN";
+
     return {
       effectiveMode,
-      guardReasons: [...new Set(guardReasons)],
+      guardReasons: uniqueReasons,
+      safe,
+      safeStreak: this.safeStreak,
+      autoPromotedThisSync,
       circuitBreaker: this.circuitSnapshot(trippedThisSync)
     };
   }
