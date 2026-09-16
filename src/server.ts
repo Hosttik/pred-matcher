@@ -5,11 +5,13 @@ import type { OpportunityType, Venue } from "./core/types.js";
 import { CatalogRefresher } from "./service/catalog-refresh.js";
 import { LiveScanner } from "./service/live-scanner.js";
 import { renderPrometheusMetrics } from "./service/metrics.js";
+import { handleQualityRequest } from "./service/quality-api.js";
+import { QualityRepository } from "./service/quality-repository.js";
 import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const STARTED_AT_MS = Date.now();
 
 function configuredPositiveInt(name: string, fallback: number): number {
@@ -27,8 +29,15 @@ function createPersistence(): SqliteStateRepository | undefined {
   return new SqliteStateRepository(path, historyLimit);
 }
 
+function createQualityRepository(): QualityRepository {
+  const path = process.env.PRED_MATCHER_QUALITY_DB_PATH?.trim() ||
+    (process.env.NODE_ENV === "test" ? ":memory:" : "./data/pred-matcher-quality.sqlite");
+  return new QualityRepository(path);
+}
+
 const historyLimit = configuredPositiveInt("PRED_MATCHER_HISTORY_LIMIT", 10_000);
 const store = new MemoryStore(historyLimit, createPersistence());
+const qualityRepository = createQualityRepository();
 const liveScanner = new LiveScanner(store);
 let activeSync: Promise<unknown> | undefined;
 
@@ -91,11 +100,14 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
 
   if (request.method === "GET" && url.pathname === "/health") {
     const persistence = store.getPersistenceStatus();
-    json(response, persistence.healthy ? 200 : 503, {
-      status: persistence.healthy ? "ok" : "degraded",
+    const quality = qualityRepository.status();
+    const healthy = persistence.healthy && quality.healthy;
+    json(response, healthy ? 200 : 503, {
+      status: healthy ? "ok" : "degraded",
       version: VERSION,
       lastSync: store.getLastSync() ?? null,
       persistence,
+      quality,
       catalog: catalogRefresher.getStatus(),
       live: liveScanner.getStatus()
     });
@@ -104,11 +116,13 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
 
   if (request.method === "GET" && url.pathname === "/ready") {
     const persistence = store.getPersistenceStatus();
-    const ready = Boolean(store.getLastSync()) && persistence.healthy;
+    const quality = qualityRepository.status();
+    const ready = Boolean(store.getLastSync()) && persistence.healthy && quality.healthy;
     json(response, ready ? 200 : 503, {
       ready,
       restoredOrSynced: Boolean(store.getLastSync()),
-      persistenceHealthy: persistence.healthy
+      persistenceHealthy: persistence.healthy,
+      qualityPersistenceHealthy: quality.healthy
     });
     return;
   }
@@ -255,6 +269,8 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     return;
   }
 
+  if (await handleQualityRequest(request, response, url, store, qualityRepository)) return;
+
   json(response, 404, { error: "not_found" });
 }
 
@@ -288,6 +304,7 @@ if (process.env.NODE_ENV !== "test") {
     liveScanner.stop();
     server.close(() => {
       store.close();
+      qualityRepository.close();
     });
   };
 

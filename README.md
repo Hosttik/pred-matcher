@@ -1,29 +1,30 @@
 # pred-matcher
 
-Durable live prediction-market relation, contract verification, and net executable opportunity scanner for Polymarket and Kalshi.
+Durable live prediction-market relation, contract-verification, matcher-quality, historical-replay, and net executable opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.6.0**.
+Current version: **0.7.0**.
 
 ## Scope
 
-- Public Polymarket Gamma ingestion and public Kalshi Markets API ingestion.
+- Polymarket + Kalshi catalog ingestion.
 - Indexed cross-venue candidate retrieval and structured contract verification.
 - Relations: `EQUIVALENT`, `SIMILAR`, `THRESHOLD_NESTED`, `TIME_NESTED`, `IMPLIES`.
 - Full-depth books, venue fee metadata, VWAP/slippage simulation, quote freshness, and target-size execution checks.
-- Public Polymarket CLOB WebSocket streaming.
-- Authenticated Kalshi orderbook WebSocket streaming when read credentials are configured.
-- Relation-indexed incremental opportunity recomputation.
-- Opportunity lifecycle history: `OPEN`, `UPDATE`, `CLOSE`.
-- Durable SQLite state for markets, relations, opportunities, sync state, and lifecycle history.
-- Periodic catalog refresh, Prometheus metrics, readiness checks, and graceful shutdown.
-- Sharded WebSocket subscriptions for large relation sets.
+- Live Polymarket and authenticated Kalshi order-book streaming.
+- Relation-local incremental opportunity recomputation.
+- Durable SQLite operational state and restart recovery.
+- Periodic catalog refresh, readiness, Prometheus metrics, graceful shutdown, and WebSocket sharding.
+- Durable relation-label dataset with `MANUAL`, `ADJUDICATED`, and `PSEUDO` provenance.
+- Matcher precision/recall/F1 and false-arbitrage-rate reporting.
+- Settlement-consistency feedback for resolved binary markets.
+- Historical replay in fixed-relation or full-rematch mode with opportunity lifetime/session statistics.
 
 ## Requirements
 
 - Node.js **24.15+**
 - npm 11+
 
-The durable store uses Node's built-in `node:sqlite`; no native SQLite npm dependency is required.
+The service uses Node's built-in `node:sqlite`; no native SQLite npm dependency is required.
 
 Pinned package versions:
 
@@ -41,15 +42,19 @@ npm install
 npm run dev
 ```
 
-By default the service creates:
+Default operational database:
 
 ```text
 ./data/pred-matcher.sqlite
 ```
 
-The database uses WAL mode for file-backed storage.
+Default matcher-quality database:
 
-Initial/manual catalog refresh:
+```text
+./data/pred-matcher-quality.sqlite
+```
+
+Manual catalog sync:
 
 ```bash
 curl -X POST http://localhost:3000/v1/sync
@@ -62,91 +67,162 @@ curl -X POST http://localhost:3000/v1/live/start
 curl http://localhost:3000/v1/live/status
 ```
 
-`POST /v1/live/start` performs an initial sync automatically if neither a restored nor a current sync state exists.
+## Durable operational state
 
-## Durable state and restart recovery
-
-`0.6.0` persists the current operational state rather than relying on RAM only. The SQLite database stores:
-
-```text
-markets
-relations
-opportunities
-opportunity_history
-sync_state
-```
-
-A full catalog sync replaces the current markets/relations/opportunities in one transaction. Live order-book updates use incremental upserts/deletes and append lifecycle history.
-
-On process restart, the in-memory indices are rebuilt from SQLite immediately. This means `/v1/markets`, `/v1/relations`, `/v1/history`, and the last known opportunity state are available before the next external catalog refresh finishes.
+`0.6.0+` persists markets, relations, current opportunities, lifecycle history, and last sync state in SQLite/WAL. A full sync replaces the catalog snapshot transactionally; live price changes use incremental writes.
 
 Configuration:
 
 ```bash
-# Default: ./data/pred-matcher.sqlite
 export PRED_MATCHER_DB_PATH='/var/lib/pred-matcher/state.sqlite'
-
-# Disable durable persistence entirely.
-export PRED_MATCHER_PERSISTENCE=false
-
-# Default: 10000
 export PRED_MATCHER_HISTORY_LIMIT=20000
+export PRED_MATCHER_PERSISTENCE=true
 ```
 
-For tests or intentionally ephemeral runs:
+Set `PRED_MATCHER_PERSISTENCE=false` for RAM-only operational state.
+
+## Matcher-quality dataset
+
+`0.7.0` deliberately separates evaluation data from runtime scanner state. Relation labels and settlements are stored in a second SQLite database:
 
 ```bash
-export PRED_MATCHER_DB_PATH=':memory:'
+export PRED_MATCHER_QUALITY_DB_PATH='/var/lib/pred-matcher/quality.sqlite'
 ```
 
-SQLite does not contain Kalshi API keys or private keys.
+A label represents the adjudicated semantic relation for one market pair:
 
-## Runtime architecture
-
-```text
-periodic/manual catalog REST sync
-              ↓
-contract matcher + relation graph
-              ↓
-transactional SQLite snapshot
-              ↓
-relation-relevant markets only
-              ↓
-┌────────────────────────┬────────────────────────┐
-│ Polymarket public WS   │ Kalshi authenticated WS│
-│ sharded connections   │ sharded connections    │
-└────────────┬───────────┴────────────┬───────────┘
-             ↓                        ↓
-          normalized live books
-                    ↓
-        affected relation index only
-                    ↓
-      fee/depth-aware opportunity scan
-                    ↓
-          OPEN / UPDATE / CLOSE
-                    ↓
-          RAM + SQLite history
+```json
+{
+  "leftId": "polymarket:...",
+  "rightId": "kalshi:...",
+  "type": "EQUIVALENT",
+  "source": "ADJUDICATED",
+  "labeledAt": "2026-09-16T10:00:00Z",
+  "notes": "resolution rules checked manually"
+}
 ```
 
-Settlement relations remain static between catalog refreshes; order-book changes never trigger a global rematch.
+For directed relations (`IMPLIES`, `THRESHOLD_NESTED`, `TIME_NESTED`) include:
+
+```json
+{
+  "direction": "LEFT_IMPLIES_RIGHT"
+}
+```
+
+`type: "NONE"` is the hard-negative label for pairs that should not be related. `PSEUDO` labels are stored separately from gold labels: `/v1/quality/report` excludes them unless `includePseudo=true` is explicitly requested.
+
+This prevents third-party/model confidence from being silently treated as ground truth.
+
+## Matcher quality metrics
+
+Create/update a label:
+
+```bash
+curl -X POST http://localhost:3000/v1/quality/labels \
+  -H 'content-type: application/json' \
+  -d '{"leftId":"polymarket:a","rightId":"kalshi:b","type":"EQUIVALENT","source":"ADJUDICATED"}'
+```
+
+Inspect unlabeled current predictions:
+
+```bash
+curl 'http://localhost:3000/v1/quality/candidates?unlabeled=true'
+```
+
+Evaluate the current relation graph against gold labels:
+
+```bash
+curl http://localhost:3000/v1/quality/report
+```
+
+The report includes:
+
+- labeled and predicted pair counts;
+- exact relation matches;
+- wrong type/direction count;
+- missing predictions;
+- per-relation precision, recall, and F1;
+- micro precision, recall, and F1;
+- `falseArbPredictions` and `falseArbRate` for strong relation classes capable of producing guaranteed-payout trades.
+
+False-arbitrage precision should be treated as the highest-priority matcher metric because a false positive can directly create a bad trade.
+
+## Settlement feedback
+
+Store a resolved binary outcome:
+
+```bash
+curl -X POST http://localhost:3000/v1/quality/settlements \
+  -H 'content-type: application/json' \
+  -d '{"marketId":"kalshi:...","outcome":"YES","resolvedAt":"2026-09-16T10:00:00Z"}'
+```
+
+Supported outcomes: `YES`, `NO`, `INVALID`.
+
+Evaluate current relations against stored settlements:
+
+```bash
+curl http://localhost:3000/v1/quality/settlement-report
+```
+
+Interpretation is intentionally conservative:
+
+- `VIOLATED`: observed outcomes contradict the claimed logical relation; this is strong negative evidence.
+- `CONSISTENT`: observed outcomes do not contradict the relation; this does **not** prove semantic equivalence or implication.
+- `INCONCLUSIVE`: missing/invalid settlement or a relation such as `SIMILAR` with no strict logical settlement constraint.
+
+For `A ⇒ B`, only `A=YES, B=NO` is a violation.
+
+## Historical replay
+
+`POST /v1/replay` accepts ordered or unordered historical market snapshots and replays opportunity detection using each frame's own timestamp for quote freshness.
+
+Two modes are supported:
+
+- `FIXED_RELATIONS`: hold a supplied/current relation graph constant and isolate the pricing/execution engine.
+- `REMATCH`: rerun candidate retrieval + matcher independently on every frame to measure relation churn and end-to-end historical behavior.
+
+Example:
+
+```json
+{
+  "mode": "FIXED_RELATIONS",
+  "frames": [
+    {
+      "capturedAt": "2026-09-16T10:00:00Z",
+      "markets": []
+    }
+  ],
+  "minimumNetEdge": 0,
+  "maxQuoteAgeMs": 15000,
+  "includeStale": false
+}
+```
+
+The replay report includes:
+
+- frame count and per-frame market/relation/opportunity counts;
+- candidate-pair and relation observations in rematch mode;
+- unique relations;
+- opportunity observations and unique opportunities;
+- open/close counts;
+- per-opportunity sessions, first/last seen timestamps, total visible duration, peak net edge/profit, and max profitable size.
+
+A single opportunity ID can have multiple sessions when it disappears and later reopens.
 
 ## Catalog refresh
 
-A periodic catalog refresh is enabled by default every five minutes. It fetches open markets, rebuilds the relation graph, refreshes REST execution metadata/books, commits the new snapshot, and restarts live subscriptions if live mode was already running.
+Periodic refresh is enabled by default every five minutes:
 
 ```bash
-# Default: 300000 (5 minutes)
 export PRED_MATCHER_CATALOG_REFRESH_MS=300000
-
-# Disable periodic refresh.
-export PRED_MATCHER_CATALOG_AUTO_REFRESH=false
+export PRED_MATCHER_CATALOG_AUTO_REFRESH=true
 ```
 
-When automatic catalog refresh is enabled and no durable snapshot exists, the service performs an initial sync after startup.
+A refresh rebuilds the relation graph and REST execution snapshot. If live mode is already active, subscriptions restart against the new relation-relevant market set.
 
 ## WebSocket sharding
-
-Large relation sets are split across multiple connections instead of sending one unbounded subscription request.
 
 Defaults:
 
@@ -155,27 +231,11 @@ export PRED_MATCHER_POLYMARKET_WS_MARKETS_PER_CONNECTION=250
 export PRED_MATCHER_KALSHI_WS_MARKETS_PER_CONNECTION=200
 ```
 
-These are operational caps, not claims about venue hard limits. Tune them based on observed connection stability and venue guidance.
+These are operational caps rather than claims about venue hard limits.
 
-`GET /v1/live/status` reports both `subscribedMarkets` and `connections` per venue.
+## Kalshi live credentials
 
-## Polymarket live feed
-
-The service subscribes to the public CLOB market channel for the YES/NO asset IDs of markets participating in strong relations.
-
-Behavior:
-
-- full `book` messages replace the local side book;
-- `price_change` messages update one level in place;
-- `PING` is sent every 10 seconds;
-- reconnects use bounded exponential backoff;
-- after reconnect, incremental deltas are ignored until a fresh full `book` is received for that token.
-
-No Polymarket credentials are required for this market-data feed.
-
-## Kalshi live feed
-
-Kalshi's orderbook WebSocket requires an authenticated handshake. Configure a read-only key with either a PEM file or inline PEM:
+Kalshi's market-data WebSocket requires authentication:
 
 ```bash
 export KALSHI_API_KEY_ID='...'
@@ -189,134 +249,59 @@ export KALSHI_API_KEY_ID='...'
 export KALSHI_PRIVATE_KEY_PEM='-----BEGIN PRIVATE KEY-----\n...'
 ```
 
-The private key is used only for the RSA-PSS WebSocket handshake signature and is never serialized into SQLite, JSONL history, logs, or API responses.
-
-The subscription explicitly requests `use_yes_price: true`. Sequence gaps cause the affected market to wait for a fresh snapshot before later deltas are accepted.
-
-Without credentials, Kalshi remains on the last REST snapshot and is explicitly reported as `DEGRADED`.
-
-## Opportunity history
-
-Incremental updates compare the previous and new opportunity set for affected relations only:
-
-- `OPEN`: a previously absent net opportunity appears;
-- `UPDATE`: a material execution metric changes;
-- `CLOSE`: a previous opportunity is no longer net-profitable/executable.
-
-Query history:
-
-```bash
-curl 'http://localhost:3000/v1/history?limit=100'
-curl --get 'http://localhost:3000/v1/history' --data-urlencode 'opportunityId=EQUIVALENT_ARB:...'
-```
-
-SQLite history is durable. Optional append-only JSONL remains available as a secondary audit stream:
-
-```bash
-export PRED_MATCHER_HISTORY_FILE='./data/opportunity-history.jsonl'
-```
-
-## Auto-start live mode
-
-```bash
-export PRED_MATCHER_LIVE_AUTO_START=true
-npm start
-```
-
-If durable state was restored, live subscriptions can start from that relation graph immediately. If no sync state exists, an initial REST sync is performed first.
+Without credentials, Kalshi live mode reports `DEGRADED` and continues to expose the most recent REST snapshot.
 
 ## Health and observability
 
-### `GET /health`
+- `GET /health`: operational persistence, quality persistence, catalog scheduler, live state, version.
+- `GET /ready`: `200` only after restored/current sync state exists and both SQLite stores are healthy.
+- `GET /metrics`: Prometheus exposition for scanner/runtime metrics.
+- `GET /v1/quality/status`: matcher-quality database status and label/settlement counts.
 
-Returns version, last sync, SQLite status, catalog scheduler status, and live-scanner status. Returns `503` if durable persistence is unhealthy.
+## Core API
 
-### `GET /ready`
+- `POST /v1/sync`
+- `GET /v1/catalog/status`
+- `POST /v1/catalog/refresh`
+- `POST /v1/live/start`
+- `POST /v1/live/stop`
+- `GET /v1/live/status`
+- `GET /v1/history`
+- `GET /v1/markets`
+- `GET /v1/contracts`
+- `GET /v1/relations`
+- `GET /v1/opportunities`
 
-Returns `200` only after a current or restored sync state exists and persistence is healthy. Otherwise returns `503`.
+## Quality/replay API
 
-### `GET /metrics`
+- `GET /v1/quality/status`
+- `GET /v1/quality/labels`
+- `POST /v1/quality/labels`
+- `GET /v1/quality/candidates?unlabeled=true`
+- `GET /v1/quality/report?includePseudo=false`
+- `GET /v1/quality/settlements`
+- `POST /v1/quality/settlements`
+- `GET /v1/quality/settlement-report`
+- `POST /v1/replay`
 
-Prometheus text exposition including:
-
-- market counts by venue;
-- current relations/opportunities;
-- persistence health/object counts;
-- last sync timestamp;
-- live updates/recomputations;
-- connection/subscription counts;
-- catalog refresh attempts/successes/failures/skips.
-
-## API
-
-### `POST /v1/sync`
-
-Manual full catalog refresh. If live mode is running, subscriptions are restarted against the new relation graph.
-
-### `GET /v1/catalog/status`
-
-Returns scheduler interval, counters, last success/error, and current run state.
-
-### `POST /v1/catalog/refresh`
-
-Explicit catalog refresh alias with the same overlap protection as `/v1/sync`.
-
-### `POST /v1/live/start`
-
-Starts live market-data subscriptions.
-
-### `POST /v1/live/stop`
-
-Stops all venue streams.
-
-### `GET /v1/live/status`
-
-Returns per-venue connection state, shard count, subscription count, reconnects, latest message time, and incremental recomputation counters.
-
-### `GET /v1/history?limit=100&opportunityId=...`
-
-Returns recent lifecycle events, newest first.
-
-### `GET /v1/markets?venue=polymarket|kalshi`
-
-Returns current normalized market state.
-
-### `GET /v1/contracts?marketId=...`
-
-Returns the structured contract representation for one market.
-
-### `GET /v1/relations?type=...`
-
-Returns detected relations and verification evidence.
-
-### `GET /v1/opportunities`
-
-Supported query parameters:
-
-- `type=EQUIVALENT_ARB|IMPLICATION_ARB`
-- `minGrossEdge=<dollars-per-share>`
-- `minNetEdge=<dollars-per-share>`
-- `targetShares=<contracts>`
-- `maxQuoteAgeMs=<milliseconds>`
-- `includeStale=true|false`
-
-Execution metrics are recalculated from the current books, so caller-specific size/freshness filters do not require a global rematch.
+Replay request bodies are capped at 25 MB; other quality mutations are capped at 2 MB.
 
 ## Versioning
 
 The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 
-- `0.1.0`: first runnable cross-venue matcher MVP.
-- `0.2.0`: structured contract parsing, verification, `SIMILAR`, and composed `IMPLIES` relations.
-- `0.3.0`: top-of-book hydration and gross opportunity engine.
-- `0.4.0`: full-depth VWAP, taker fees, freshness, target-size simulation, and net executable estimates.
-- `0.5.0`: live WebSocket data, incremental relation-local recomputation, lifecycle history, and optional JSONL persistence.
-- `0.6.0`: SQLite restart recovery, periodic catalog refresh, metrics/readiness, graceful shutdown, and sharded live subscriptions.
+- `0.1.0`: runnable cross-venue matcher MVP.
+- `0.2.0`: structured contract verification and richer relation classes.
+- `0.3.0`: top-of-book gross opportunity engine.
+- `0.4.0`: full-depth VWAP, fees, freshness, and net executable estimates.
+- `0.5.0`: live WebSocket scanner and incremental lifecycle history.
+- `0.6.0`: durable operational state, refresh scheduler, observability, and WS sharding.
+- `0.7.0`: durable relation labels, matcher-quality metrics, settlement feedback, and historical replay.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
 ## Important limitations
 
-`0.6.0` is still a scanner, not an atomic two-venue execution engine. Durable state and live data do not eliminate execution latency, partial-fill risk, capital/position constraints, venue pauses, account-specific fee differences, or settlement disputes.
+`0.7.0` remains a scanner, not an atomic two-venue execution engine. Replay quality depends on the fidelity and cadence of captured historical books. Settlement consistency is negative-evidence oriented: a non-violating realized outcome cannot prove that two contracts had identical resolution semantics.
 
-The SQLite implementation is intentionally single-process. Running multiple writable replicas against the same database file is not a supported deployment model; a later distributed deployment should move the persistence interface to PostgreSQL or another shared transactional store.
+The SQLite stores are intentionally single-process. Multiple writable replicas sharing one database file are not a supported deployment model; distributed deployment should move the persistence interfaces to a shared transactional database.
