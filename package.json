@@ -1,8 +1,8 @@
 {
   "name": "pred-matcher",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
-  "description": "Durable live prediction-market relation, verification, and executable opportunity scanner for Polymarket and Kalshi.",
+  "description": "Durable live prediction-market matcher with quality evaluation, settlement feedback, and historical replay for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
     "node": ">=24.15.0"
