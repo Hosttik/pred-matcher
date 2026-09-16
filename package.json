@@ -1,8 +1,8 @@
 {
   "name": "pred-matcher",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
-  "description": "Durable live prediction-market matcher with historical capture, calibration, regression gates, quality evaluation, settlement feedback, and replay for Polymarket and Kalshi.",
+  "description": "Durable live prediction-market matcher with semantic-verifier shadow mode, historical capture, calibration, regression gates, quality evaluation, settlement feedback, and replay for Polymarket and Kalshi.",
   "type": "module",
   "engines": {
     "node": ">=24.15.0"
