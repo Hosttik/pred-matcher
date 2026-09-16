@@ -14,7 +14,7 @@ import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const STARTED_AT_MS = Date.now();
 
 function configuredPositiveInt(name: string, fallback: number): number {

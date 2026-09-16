@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "candidateConfig": {
+    "minimumCandidateScore": 0.2,
+    "minimumArbConfidence": 0
+  },
+  "policy": {
+    "maxFalseArbRate": 0,
+    "maxFalseArbRateIncrease": 0,
+    "maxMicroPrecisionDrop": 0,
+    "maxMicroRecallDrop": 0,
+    "minimumLabeledPairs": 5,
+    "minimumArbPredictions": 4
+  },
+  "frames": [
+    {
+      "capturedAt": "2026-01-01T00:00:00.000Z",
+      "markets": [
+        {
+          "id": "polymarket:eq-p",
+          "venue": "polymarket",
+          "externalId": "eq-p",
+          "title": "Will Bitcoin be above $150,000 by December 31, 2026?",
+          "prices": {}
+        },
+        {
+          "id": "kalshi:eq-k",
+          "venue": "kalshi",
+          "externalId": "eq-k",
+          "title": "Will Bitcoin be above 150000 by December 31, 2026?",
+          "prices": {}
+        }
+      ],
+      "relations": []
+    },
+    {
+      "capturedAt": "2026-01-01T00:01:00.000Z",
+      "markets": [
+        {
+          "id": "polymarket:threshold-p",
+          "venue": "polymarket",
+          "externalId": "threshold-p",
+          "title": "Will Bitcoin be above $160k by December 31, 2026?",
+          "prices": {}
+        },
+        {
+          "id": "kalshi:threshold-k",
+          "venue": "kalshi",
+          "externalId": "threshold-k",
+          "title": "Will Bitcoin be above $150k by December 31, 2026?",
+          "prices": {}
+        }
+      ],
+      "relations": []
+    },
+    {
+      "capturedAt": "2026-01-01T00:02:00.000Z",
+      "markets": [
+        {
+          "id": "polymarket:time-p",
+          "venue": "polymarket",
+          "externalId": "time-p",
+          "title": "Will the Fed cut rates by June 30, 2027?",
+          "closeTime": "2027-06-30T23:59:59Z",
+          "prices": {}
+        },
+        {
+          "id": "kalshi:time-k",
+          "venue": "kalshi",
+          "externalId": "time-k",
+          "title": "Will the Fed cut rates by December 31, 2027?",
+          "closeTime": "2027-12-31T23:59:59Z",
+          "prices": {}
+        }
+      ],
+      "relations": []
+    },
+    {
+      "capturedAt": "2026-01-01T00:03:00.000Z",
+      "markets": [
+        {
+          "id": "polymarket:imp-p",
+          "venue": "polymarket",
+          "externalId": "imp-p",
+          "title": "Will Bitcoin be above $160k by June 30, 2027?",
+          "prices": {}
+        },
+        {
+          "id": "kalshi:imp-k",
+          "venue": "kalshi",
+          "externalId": "imp-k",
+          "title": "Will Bitcoin be above $150k by December 31, 2027?",
+          "prices": {}
+        }
+      ],
+      "relations": []
+    },
+    {
+      "capturedAt": "2026-01-01T00:04:00.000Z",
+      "markets": [
+        {
+          "id": "polymarket:similar-p",
+          "venue": "polymarket",
+          "externalId": "similar-p",
+          "title": "Will Bitcoin be above $150,000 by December 31, 2026?",
+          "resolutionSource": "https://coinbase.com",
+          "prices": {}
+        },
+        {
+          "id": "kalshi:similar-k",
+          "venue": "kalshi",
+          "externalId": "similar-k",
+          "title": "Will Bitcoin be above 150000 by December 31, 2026?",
+          "resolutionSource": "https://kraken.com",
+          "prices": {}
+        }
+      ],
+      "relations": []
+    }
+  ],
+  "labels": [
+    {
+      "leftId": "polymarket:eq-p",
+      "rightId": "kalshi:eq-k",
+      "type": "EQUIVALENT",
+      "source": "ADJUDICATED",
+      "labeledAt": "2026-01-02T00:00:00.000Z"
+    },
+    {
+      "leftId": "polymarket:threshold-p",
+      "rightId": "kalshi:threshold-k",
+      "type": "THRESHOLD_NESTED",
+      "direction": "LEFT_IMPLIES_RIGHT",
+      "source": "ADJUDICATED",
+      "labeledAt": "2026-01-02T00:00:00.000Z"
+    },
+    {
+      "leftId": "polymarket:time-p",
+      "rightId": "kalshi:time-k",
+      "type": "TIME_NESTED",
+      "direction": "LEFT_IMPLIES_RIGHT",
+      "source": "ADJUDICATED",
+      "labeledAt": "2026-01-02T00:00:00.000Z"
+    },
+    {
+      "leftId": "polymarket:imp-p",
+      "rightId": "kalshi:imp-k",
+      "type": "IMPLIES",
+      "direction": "LEFT_IMPLIES_RIGHT",
+      "source": "ADJUDICATED",
+      "labeledAt": "2026-01-02T00:00:00.000Z"
+    },
+    {
+      "leftId": "polymarket:similar-p",
+      "rightId": "kalshi:similar-k",
+      "type": "SIMILAR",
+      "source": "ADJUDICATED",
+      "labeledAt": "2026-01-02T00:00:00.000Z"
+    }
+  ],
+  "baselinePredictions": [
+    {
+      "leftId": "polymarket:eq-p",
+      "rightId": "kalshi:eq-k",
+      "type": "EQUIVALENT",
+      "confidence": 1,
+      "evidence": ["frozen_regression_baseline"]
+    },
+    {
+      "leftId": "polymarket:threshold-p",
+      "rightId": "kalshi:threshold-k",
+      "type": "THRESHOLD_NESTED",
+      "direction": "LEFT_IMPLIES_RIGHT",
+      "confidence": 1,
+      "evidence": ["frozen_regression_baseline"]
+    },
+    {
+      "leftId": "polymarket:time-p",
+      "rightId": "kalshi:time-k",
+      "type": "TIME_NESTED",
+      "direction": "LEFT_IMPLIES_RIGHT",
+      "confidence": 1,
+      "evidence": ["frozen_regression_baseline"]
+    },
+    {
+      "leftId": "polymarket:imp-p",
+      "rightId": "kalshi:imp-k",
+      "type": "IMPLIES",
+      "direction": "LEFT_IMPLIES_RIGHT",
+      "confidence": 1,
+      "evidence": ["frozen_regression_baseline"]
+    },
+    {
+      "leftId": "polymarket:similar-p",
+      "rightId": "kalshi:similar-k",
+      "type": "SIMILAR",
+      "confidence": 1,
+      "evidence": ["frozen_regression_baseline"]
+    }
+  ]
+}
