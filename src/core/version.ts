@@ -1,4 +1,4 @@
-export const APP_VERSION = "0.13.0";
+export const APP_VERSION = "0.14.0";
 
 // Bump this whenever deterministic matcher semantics, thresholds, or relation rules change.
 // Promotion evidence is pinned to this value independently from the package version.
