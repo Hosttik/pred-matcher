@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { normalizeRelationLabel, relationPairKey, type RelationLabel } from "../core/quality.js";
+import type { SemanticRolloutEvidence, SemanticVetoDecisionEvidence } from "../core/rollout-evidence.js";
 import type { MarketSettlement } from "../core/settlement.js";
 import type {
   ShadowExperimentRecord,
@@ -24,10 +25,12 @@ export interface QualityRepositoryStatus {
   shadowVerifications: number;
   shadowExperiments: number;
   shadowReviewCandidates: number;
+  rolloutEvidence: number;
+  rolloutDecisions: number;
   lastError?: string;
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -117,6 +120,37 @@ export class QualityRepository {
         );
         CREATE INDEX IF NOT EXISTS shadow_review_priority_idx
           ON shadow_review_candidates(priority DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS semantic_rollout_evidence (
+          evidence_id TEXT PRIMARY KEY,
+          synced_at TEXT NOT NULL,
+          requested_mode TEXT NOT NULL,
+          effective_mode TEXT NOT NULL,
+          safe INTEGER NOT NULL,
+          matcher_version TEXT NOT NULL,
+          model TEXT,
+          prompt_version TEXT,
+          json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS semantic_rollout_evidence_synced_idx
+          ON semantic_rollout_evidence(synced_at DESC);
+        CREATE INDEX IF NOT EXISTS semantic_rollout_evidence_pin_idx
+          ON semantic_rollout_evidence(matcher_version, model, prompt_version, synced_at DESC);
+
+        CREATE TABLE IF NOT EXISTS semantic_rollout_decisions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          evidence_id TEXT NOT NULL REFERENCES semantic_rollout_evidence(evidence_id) ON DELETE CASCADE,
+          pair_key TEXT NOT NULL,
+          action TEXT NOT NULL,
+          relation_type TEXT NOT NULL,
+          captured_at TEXT NOT NULL,
+          json TEXT NOT NULL,
+          UNIQUE(evidence_id, pair_key)
+        );
+        CREATE INDEX IF NOT EXISTS semantic_rollout_decisions_pair_idx
+          ON semantic_rollout_decisions(pair_key, captured_at DESC);
+        CREATE INDEX IF NOT EXISTS semantic_rollout_decisions_action_idx
+          ON semantic_rollout_decisions(action, captured_at DESC);
 
         PRAGMA user_version = ${SCHEMA_VERSION};
       `);
@@ -293,6 +327,92 @@ export class QualityRepository {
     } catch (error) { this.lastError = errorMessage(error); throw error; }
   }
 
+  appendRolloutEvidence(
+    evidence: SemanticRolloutEvidence,
+    decisions: readonly SemanticVetoDecisionEvidence[]
+  ): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO semantic_rollout_evidence(
+          evidence_id, synced_at, requested_mode, effective_mode, safe, matcher_version, model, prompt_version, json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(evidence_id) DO UPDATE SET
+          synced_at=excluded.synced_at, requested_mode=excluded.requested_mode,
+          effective_mode=excluded.effective_mode, safe=excluded.safe,
+          matcher_version=excluded.matcher_version, model=excluded.model,
+          prompt_version=excluded.prompt_version, json=excluded.json
+      `).run(
+        evidence.evidenceId,
+        evidence.syncedAt,
+        evidence.requestedMode,
+        evidence.effectiveMode,
+        evidence.safe ? 1 : 0,
+        evidence.matcherVersion,
+        evidence.model ?? null,
+        evidence.promptVersion ?? null,
+        JSON.stringify(evidence)
+      );
+      const statement = this.db.prepare(`
+        INSERT INTO semantic_rollout_decisions(
+          evidence_id, pair_key, action, relation_type, captured_at, json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(evidence_id, pair_key) DO UPDATE SET
+          action=excluded.action, relation_type=excluded.relation_type,
+          captured_at=excluded.captured_at, json=excluded.json
+      `);
+      for (const decision of decisions) {
+        statement.run(
+          decision.evidenceId,
+          decision.pairKey,
+          decision.action,
+          decision.relationType,
+          decision.capturedAt,
+          JSON.stringify(decision)
+        );
+      }
+    });
+  }
+
+  listRolloutEvidence(limit = 100): SemanticRolloutEvidence[] {
+    const bounded = boundedLimit(limit, 100, 5000);
+    try {
+      const rows = this.db.prepare(`
+        SELECT json FROM semantic_rollout_evidence ORDER BY synced_at DESC LIMIT ?
+      `).all(bounded) as unknown as JsonRow[];
+      this.lastError = undefined;
+      return rows.map((row) => JSON.parse(row.json) as SemanticRolloutEvidence);
+    } catch (error) { this.lastError = errorMessage(error); throw error; }
+  }
+
+  listRolloutDecisions(options: { limit?: number; evidenceId?: string; action?: "CONFIRMED" | "VETOED" } = {}): SemanticVetoDecisionEvidence[] {
+    const limit = boundedLimit(options.limit, 500, 20_000);
+    try {
+      let rows: JsonRow[];
+      if (options.evidenceId && options.action) {
+        rows = this.db.prepare(`
+          SELECT json FROM semantic_rollout_decisions
+          WHERE evidence_id = ? AND action = ? ORDER BY captured_at DESC, id DESC LIMIT ?
+        `).all(options.evidenceId, options.action, limit) as unknown as JsonRow[];
+      } else if (options.evidenceId) {
+        rows = this.db.prepare(`
+          SELECT json FROM semantic_rollout_decisions
+          WHERE evidence_id = ? ORDER BY captured_at DESC, id DESC LIMIT ?
+        `).all(options.evidenceId, limit) as unknown as JsonRow[];
+      } else if (options.action) {
+        rows = this.db.prepare(`
+          SELECT json FROM semantic_rollout_decisions
+          WHERE action = ? ORDER BY captured_at DESC, id DESC LIMIT ?
+        `).all(options.action, limit) as unknown as JsonRow[];
+      } else {
+        rows = this.db.prepare(`
+          SELECT json FROM semantic_rollout_decisions ORDER BY captured_at DESC, id DESC LIMIT ?
+        `).all(limit) as unknown as JsonRow[];
+      }
+      this.lastError = undefined;
+      return rows.map((row) => JSON.parse(row.json) as SemanticVetoDecisionEvidence);
+    } catch (error) { this.lastError = errorMessage(error); throw error; }
+  }
+
   status(): QualityRepositoryStatus {
     const count = (table: string): number => {
       const row = this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as unknown as CountRow;
@@ -310,6 +430,8 @@ export class QualityRepository {
         shadowVerifications: count("shadow_verifications"),
         shadowExperiments: count("shadow_experiments"),
         shadowReviewCandidates: count("shadow_review_candidates"),
+        rolloutEvidence: count("semantic_rollout_evidence"),
+        rolloutDecisions: count("semantic_rollout_decisions"),
         ...(this.lastError ? { lastError: this.lastError } : {})
       };
     } catch (error) {
@@ -317,7 +439,8 @@ export class QualityRepository {
       return {
         healthy: false, driver: "sqlite", path: this.displayPath, schemaVersion: SCHEMA_VERSION,
         labels: 0, settlements: 0, shadowRuns: 0, shadowVerifications: 0,
-        shadowExperiments: 0, shadowReviewCandidates: 0, lastError: this.lastError
+        shadowExperiments: 0, shadowReviewCandidates: 0, rolloutEvidence: 0,
+        rolloutDecisions: 0, lastError: this.lastError
       };
     }
   }
