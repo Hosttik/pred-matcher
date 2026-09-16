@@ -2,11 +2,12 @@ import { matchMarkets } from "./matcher.js";
 import { findOpportunities } from "./opportunities.js";
 import type { MarketOpportunity, MarketRelation, NormalizedMarket } from "./types.js";
 
-export type ReplayMode = "FIXED_RELATIONS" | "REMATCH";
+export type ReplayMode = "FIXED_RELATIONS" | "REMATCH" | "CAPTURED_RELATIONS";
 
 export interface ReplayFrame {
   capturedAt: string;
   markets: NormalizedMarket[];
+  relations?: MarketRelation[];
 }
 
 export interface ReplayOptions {
@@ -129,7 +130,9 @@ export function replayHistoricalFrames(
     const frameMs = timestamp(frame.capturedAt);
     const matched = mode === "REMATCH"
       ? matchMarkets(frame.markets, options.minimumCandidateScore ?? 0.32)
-      : { candidatePairs: 0, relations: [...fixedRelations] };
+      : mode === "CAPTURED_RELATIONS"
+        ? { candidatePairs: 0, relations: [...(frame.relations ?? [])] }
+        : { candidatePairs: 0, relations: [...fixedRelations] };
     const relations = matched.relations;
     candidatePairs += matched.candidatePairs;
     relationObservations += relations.length;

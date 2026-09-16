@@ -182,8 +182,17 @@ export async function handleQualityRequest(
       const body = await readJson(request, 25_000_000);
       if (!isObject(body)) throw new ApiError(400, "invalid_replay_request");
       const frames = parseFrames(body.frames);
-      const mode: ReplayMode = body.mode === "REMATCH" ? "REMATCH" : "FIXED_RELATIONS";
-      if (body.mode !== undefined && body.mode !== "REMATCH" && body.mode !== "FIXED_RELATIONS") {
+      const mode: ReplayMode = body.mode === "REMATCH"
+        ? "REMATCH"
+        : body.mode === "CAPTURED_RELATIONS"
+          ? "CAPTURED_RELATIONS"
+          : "FIXED_RELATIONS";
+      if (
+        body.mode !== undefined &&
+        body.mode !== "REMATCH" &&
+        body.mode !== "FIXED_RELATIONS" &&
+        body.mode !== "CAPTURED_RELATIONS"
+      ) {
         throw new ApiError(400, "invalid_replay_mode");
       }
       const relations = Array.isArray(body.relations) ? body.relations as MarketRelation[] : store.listRelations();
