@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { attributeVetoDecisions, cohortRolloutDecisions, type SemanticVetoDecisionEvidence } from "../core/rollout-evidence.js";
+import {
+  attributeVetoDecisions,
+  cohortRolloutDecisions,
+  deriveRolloutEvents,
+  type SemanticRolloutEvidence,
+  type SemanticVetoDecisionEvidence
+} from "../core/rollout-evidence.js";
 
 const decisions: SemanticVetoDecisionEvidence[] = [
   {
@@ -44,6 +50,36 @@ const decisions: SemanticVetoDecisionEvidence[] = [
   }
 ];
 
+function evidence(overrides: Partial<SemanticRolloutEvidence>): SemanticRolloutEvidence {
+  return {
+    evidenceId: "ev",
+    syncedAt: "2026-09-16T10:00:00Z",
+    requestedMode: "AUTO",
+    effectiveMode: "DRY_RUN",
+    safe: true,
+    safeStreak: 1,
+    autoPromotedThisSync: false,
+    gateEligible: true,
+    matcherVersion: "heuristic-v1",
+    checkedRelations: 2,
+    confirmedRelations: 1,
+    vetoedRelations: 1,
+    vetoRate: 0.5,
+    opportunityImpact: {
+      baselineOpportunities: 2,
+      candidateOpportunities: 1,
+      suppressedOpportunities: 1,
+      introducedOpportunities: 0,
+      opportunityRetentionRate: 0.5,
+      suppressedNetProfit: 1,
+      maximumSuppressedNetEdgePerShare: 0.02
+    },
+    guardReasons: [],
+    circuitOpen: false,
+    ...overrides
+  };
+}
+
 describe("rollout evidence analytics", () => {
   it("breaks veto evidence down by relation type and venue pair", () => {
     const cohorts = cohortRolloutDecisions(decisions);
@@ -56,6 +92,35 @@ describe("rollout evidence analytics", () => {
       vetoRate: 0.5,
       suppressedOpportunities: 1
     });
+  });
+
+  it("derives auto-promotion, enforcement, circuit, and streak-reset events", () => {
+    const events = deriveRolloutEvents([
+      evidence({ evidenceId: "a", safeStreak: 2, syncedAt: "2026-09-16T10:00:00Z" }),
+      evidence({
+        evidenceId: "b",
+        syncedAt: "2026-09-16T10:05:00Z",
+        effectiveMode: "ENFORCED",
+        safeStreak: 3,
+        autoPromotedThisSync: true
+      }),
+      evidence({
+        evidenceId: "c",
+        syncedAt: "2026-09-16T10:10:00Z",
+        effectiveMode: "DRY_RUN",
+        safe: false,
+        safeStreak: 0,
+        circuitOpen: true,
+        guardReasons: ["veto_rate_exceeded"]
+      })
+    ]);
+    expect(events.map((event) => event.type)).toEqual(expect.arrayContaining([
+      "AUTO_PROMOTED",
+      "ENFORCEMENT_STARTED",
+      "ENFORCEMENT_STOPPED",
+      "CIRCUIT_OPENED",
+      "SAFE_STREAK_RESET"
+    ]));
   });
 
   it("uses labels for true/false veto attribution and settlements only as falsification evidence", () => {
