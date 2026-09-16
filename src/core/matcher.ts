@@ -3,6 +3,8 @@ import { extractFeatures, tokenize } from "./features.js";
 import { jaccard, rounded } from "./similarity.js";
 import type { ContractComparison, MarketFeatures, MarketRelation, NormalizedMarket } from "./types.js";
 
+export const DEFAULT_MINIMUM_CANDIDATE_SCORE = 0.32;
+
 interface Candidate {
   left: NormalizedMarket;
   right: NormalizedMarket;
@@ -27,7 +29,10 @@ function buildTokenIndex(markets: readonly NormalizedMarket[], tokens: Map<strin
   return index;
 }
 
-export function generateCandidates(markets: readonly NormalizedMarket[], minimumScore = 0.32): Candidate[] {
+export function generateCandidates(
+  markets: readonly NormalizedMarket[],
+  minimumScore = DEFAULT_MINIMUM_CANDIDATE_SCORE
+): Candidate[] {
   const features = new Map(markets.map((market) => [market.id, extractFeatures(market)]));
   const tokens = new Map(markets.map((market) => [market.id, retrievalTokens(market)]));
   const polymarket = markets.filter((market) => market.venue === "polymarket");
@@ -190,7 +195,10 @@ export function classifyCandidate(candidate: Candidate): MarketRelation | undefi
   return undefined;
 }
 
-export function matchMarkets(markets: readonly NormalizedMarket[], minimumScore = 0.32): { candidatePairs: number; relations: MarketRelation[] } {
+export function matchMarkets(
+  markets: readonly NormalizedMarket[],
+  minimumScore = DEFAULT_MINIMUM_CANDIDATE_SCORE
+): { candidatePairs: number; relations: MarketRelation[] } {
   const candidates = generateCandidates(markets, minimumScore);
   const relations = candidates.map(classifyCandidate).filter((value): value is MarketRelation => value !== undefined);
   return { candidatePairs: candidates.length, relations };
