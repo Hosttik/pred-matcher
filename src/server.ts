@@ -117,6 +117,15 @@ const promotionGate = new PromotionGateService(qualityRepository, {
 });
 const restoredSemanticPolicy = store.getLastSync()?.semanticPolicy;
 const restoredCircuit = restoredSemanticPolicy?.circuitBreaker;
+const restoredPinsMatch = Boolean(
+  restoredSemanticPolicy &&
+  restoredSemanticPolicy.matcherVersion === MATCHER_VERSION &&
+  restoredSemanticPolicy.model === promotedModel &&
+  restoredSemanticPolicy.promptVersion === promotedPromptVersion
+);
+const restoredSafeStreak = restoredPinsMatch && Number.isInteger(restoredSemanticPolicy?.safeStreak)
+  ? restoredSemanticPolicy?.safeStreak ?? 0
+  : 0;
 const semanticVeto = new SemanticVetoService(semanticVerifier, promotionGate, {
   mode: semanticMode(),
   batchSize: configuredPositiveInt("PRED_MATCHER_VETO_BATCH_SIZE", 10),
@@ -125,10 +134,12 @@ const semanticVeto = new SemanticVetoService(semanticVerifier, promotionGate, {
   maximumVetoRate: configuredProbability("PRED_MATCHER_VETO_MAX_RATE", 0.35),
   minimumOpportunityRetentionRate: configuredProbability("PRED_MATCHER_VETO_MIN_OPPORTUNITY_RETENTION", 0.5),
   autoPromotionRequiredSyncs: configuredPositiveInt("PRED_MATCHER_AUTO_PROMOTION_SAFE_SYNCS", 12),
-  ...(restoredSemanticPolicy ? {
-    initialSafeStreak: restoredSemanticPolicy.safeStreak,
-    initialAutoPromoted: restoredSemanticPolicy.requestedMode === "AUTO" && restoredSemanticPolicy.effectiveMode === "ENFORCED"
-  } : {}),
+  initialSafeStreak: restoredSafeStreak,
+  initialAutoPromoted: Boolean(
+    restoredPinsMatch &&
+    restoredSemanticPolicy?.requestedMode === "AUTO" &&
+    restoredSemanticPolicy.effectiveMode === "ENFORCED"
+  ),
   ...(restoredCircuit ? {
     initialCircuit: {
       open: restoredCircuit.open,
