@@ -1,5 +1,5 @@
 import { evaluateSettlementConsistency } from "./settlement.js";
-import { relationPairKey, type RelationLabel } from "./quality.js";
+import { normalizeRelationLabel, relationPairKey, type RelationLabel } from "./quality.js";
 import type { MarketRelation, RelationType, SemanticOpportunityImpact, SemanticRolloutMode, Venue } from "./types.js";
 import type { MarketSettlement } from "./settlement.js";
 
@@ -92,7 +92,15 @@ function round(value: number): number {
 }
 
 function exactLabelMatch(decision: SemanticVetoDecisionEvidence, label: RelationLabel): boolean {
-  return decision.relationType === label.type && (decision.direction ?? undefined) === (label.direction ?? undefined);
+  const normalized = normalizeRelationLabel({
+    leftId: decision.leftId,
+    rightId: decision.rightId,
+    type: decision.relationType,
+    source: "MANUAL",
+    labeledAt: decision.capturedAt,
+    ...(decision.direction ? { direction: decision.direction } : {})
+  });
+  return normalized.type === label.type && (normalized.direction ?? undefined) === (label.direction ?? undefined);
 }
 
 export function cohortRolloutDecisions(
