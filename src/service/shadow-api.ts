@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { PromotionGateProvider } from "./promotion-gate.js";
 import type { QualityRepository } from "./quality-repository.js";
 import { ShadowVerifierService, ShadowVerifierServiceError } from "./shadow-verifier.js";
 
@@ -19,13 +20,20 @@ export async function handleShadowRequest(
   response: ServerResponse,
   url: URL,
   service: ShadowVerifierService,
-  repository: QualityRepository
+  repository: QualityRepository,
+  promotionGate?: PromotionGateProvider
 ): Promise<boolean> {
   if (!url.pathname.startsWith("/v1/shadow/")) return false;
 
   try {
     if (request.method === "GET" && url.pathname === "/v1/shadow/status") {
       json(response, 200, service.getStatus());
+      return true;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/shadow/promotion") {
+      if (!promotionGate) { json(response, 503, { error: "promotion_gate_not_configured" }); return true; }
+      const report = promotionGate.evaluate();
+      json(response, report.eligible ? 200 : 409, report);
       return true;
     }
     if (request.method === "POST" && url.pathname === "/v1/shadow/run") {
