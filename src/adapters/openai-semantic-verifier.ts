@@ -162,7 +162,9 @@ function validateDecision(value: unknown, expected: SemanticVerifierPair): Seman
   if (!isStringArray(decision.evidence) || !isStringArray(decision.materialDifferences)) {
     throw new Error("semantic_verifier_invalid_evidence");
   }
-  const direction = decision.direction === "NONE" ? undefined : decision.direction;
+  const direction = decision.direction === "NONE"
+    ? undefined
+    : decision.direction as "LEFT_IMPLIES_RIGHT" | "RIGHT_IMPLIES_LEFT";
   return {
     pairKey: expected.pairKey,
     leftId: expected.left.id,
