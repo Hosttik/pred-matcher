@@ -67,12 +67,26 @@ export function relationPairKey(leftId: string, rightId: string): string {
 }
 
 export function normalizeRelationLabel(label: RelationLabel): RelationLabel {
-  if (label.leftId <= label.rightId) return { ...label };
+  if (label.leftId <= label.rightId) {
+    return {
+      leftId: label.leftId,
+      rightId: label.rightId,
+      type: label.type,
+      source: label.source,
+      labeledAt: label.labeledAt,
+      ...(label.direction ? { direction: label.direction } : {}),
+      ...(label.notes ? { notes: label.notes } : {})
+    };
+  }
+  const direction = invertDirection(label.direction);
   return {
-    ...label,
     leftId: label.rightId,
     rightId: label.leftId,
-    ...(label.direction ? { direction: invertDirection(label.direction) } : {})
+    type: label.type,
+    source: label.source,
+    labeledAt: label.labeledAt,
+    ...(direction ? { direction } : {}),
+    ...(label.notes ? { notes: label.notes } : {})
   };
 }
 
@@ -94,12 +108,13 @@ function normalizeRelation(relation: MarketRelation): NormalizedRelation {
       ...(relation.direction ? { direction: relation.direction } : {})
     };
   }
+  const direction = invertDirection(relation.direction);
   return {
     leftId: relation.rightId,
     rightId: relation.leftId,
     type: relation.type,
     confidence: relation.confidence,
-    ...(relation.direction ? { direction: invertDirection(relation.direction) } : {})
+    ...(direction ? { direction } : {})
   };
 }
 
