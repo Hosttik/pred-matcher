@@ -1,14 +1,4 @@
-import type { MarketOpportunity } from "./types.js";
-
-export interface SemanticOpportunityImpact {
-  baselineOpportunities: number;
-  candidateOpportunities: number;
-  suppressedOpportunities: number;
-  introducedOpportunities: number;
-  opportunityRetentionRate: number | null;
-  suppressedNetProfit: number;
-  maximumSuppressedNetEdgePerShare: number | null;
-}
+import type { MarketOpportunity, SemanticOpportunityImpact } from "./types.js";
 
 function round(value: number): number {
   return Number(value.toFixed(8));
