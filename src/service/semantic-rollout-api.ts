@@ -28,7 +28,11 @@ export async function handleSemanticRolloutRequest(
     return true;
   }
   if (request.method === "POST" && url.pathname === "/v1/semantic/circuit/reset") {
-    json(response, 200, semanticVeto.resetCircuit());
+    const status = semanticVeto.resetCircuit();
+    json(response, 200, {
+      ...status,
+      requiresSyncBeforeEnforcement: semanticVeto.mode === "ENFORCED" || semanticVeto.mode === "AUTO"
+    });
     return true;
   }
   if (request.method === "GET" && url.pathname === "/v1/semantic/evidence") {
