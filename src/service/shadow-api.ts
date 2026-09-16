@@ -28,49 +28,58 @@ export async function handleShadowRequest(
       json(response, 200, service.getStatus());
       return true;
     }
-
     if (request.method === "POST" && url.pathname === "/v1/shadow/run") {
       json(response, 200, await service.run());
       return true;
     }
-
     if (request.method === "GET" && url.pathname === "/v1/shadow/runs") {
       const limit = positiveInt(url.searchParams.get("limit"), 50, 1000);
-      if (limit === undefined) {
-        json(response, 400, { error: "invalid_limit" });
-        return true;
-      }
+      if (limit === undefined) { json(response, 400, { error: "invalid_limit" }); return true; }
       const runs = repository.listShadowRuns(limit);
       json(response, 200, { count: runs.length, runs });
       return true;
     }
-
     if (request.method === "GET" && url.pathname === "/v1/shadow/observations") {
       const limit = positiveInt(url.searchParams.get("limit"), 100, 5000);
-      if (limit === undefined) {
-        json(response, 400, { error: "invalid_limit" });
-        return true;
-      }
+      if (limit === undefined) { json(response, 400, { error: "invalid_limit" }); return true; }
       const runId = url.searchParams.get("runId")?.trim() || undefined;
-      const observations = repository.listShadowVerifications({
-        limit,
-        ...(runId ? { runId } : {})
-      });
+      const observations = repository.listShadowVerifications({ limit, ...(runId ? { runId } : {}) });
       json(response, 200, { count: observations.length, observations });
       return true;
     }
-
     if (request.method === "GET" && url.pathname === "/v1/shadow/report") {
       const requestedRunId = url.searchParams.get("runId")?.trim();
-      const run = requestedRunId
-        ? repository.getShadowRun(requestedRunId)
-        : repository.listShadowRuns(1)[0];
-      if (!run) {
-        json(response, 404, { error: "shadow_run_not_found" });
-        return true;
-      }
+      const run = requestedRunId ? repository.getShadowRun(requestedRunId) : repository.listShadowRuns(1)[0];
+      if (!run) { json(response, 404, { error: "shadow_run_not_found" }); return true; }
       const observations = repository.listShadowVerifications({ limit: 5000, runId: run.runId });
       json(response, 200, { run, observations });
+      return true;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/shadow/experiments") {
+      const limit = positiveInt(url.searchParams.get("limit"), 50, 1000);
+      if (limit === undefined) { json(response, 400, { error: "invalid_limit" }); return true; }
+      const experiments = repository.listShadowExperiments(limit);
+      json(response, 200, { count: experiments.length, experiments });
+      return true;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/shadow/experiment") {
+      const experimentId = url.searchParams.get("id")?.trim();
+      if (!experimentId) { json(response, 400, { error: "experiment_id_required" }); return true; }
+      const experiment = repository.getShadowExperiment(experimentId);
+      if (!experiment) { json(response, 404, { error: "shadow_experiment_not_found" }); return true; }
+      const runs = experiment.runIds.flatMap((runId) => {
+        const run = repository.getShadowRun(runId);
+        return run ? [run] : [];
+      });
+      json(response, 200, { experiment, runs });
+      return true;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/shadow/review") {
+      const limit = positiveInt(url.searchParams.get("limit"), 100, 5000);
+      if (limit === undefined) { json(response, 400, { error: "invalid_limit" }); return true; }
+      const experimentId = url.searchParams.get("experimentId")?.trim() || undefined;
+      const candidates = repository.listShadowReviewCandidates({ limit, ...(experimentId ? { experimentId } : {}) });
+      json(response, 200, { count: candidates.length, candidates });
       return true;
     }
 

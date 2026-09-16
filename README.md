@@ -1,35 +1,26 @@
 # pred-matcher
 
-Durable live prediction-market matcher, contract verifier, executable-opportunity scanner, matcher-quality evaluator, historical dataset/replay service, and semantic-verifier shadow evaluator for Polymarket and Kalshi.
+Durable prediction-market semantic matcher and executable-opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.10.0**.
+Current version: **0.11.0**.
 
 ## Scope
 
-- Polymarket + Kalshi catalog ingestion.
 - Indexed cross-venue candidate retrieval and structured contract verification.
 - Relations: `EQUIVALENT`, `SIMILAR`, `THRESHOLD_NESTED`, `TIME_NESTED`, `IMPLIES`.
-- Full-depth books, venue fee metadata, VWAP/slippage simulation, quote freshness, and target-size execution checks.
-- Live Polymarket and authenticated Kalshi order-book streaming.
-- Relation-local incremental opportunity recomputation.
-- Durable SQLite operational state and restart recovery.
-- Periodic catalog refresh, readiness, Prometheus metrics, graceful shutdown, and WebSocket sharding.
-- Durable relation-label dataset with `MANUAL`, `ADJUDICATED`, and `PSEUDO` provenance.
-- Matcher precision/recall/F1 and false-arbitrage-rate reporting.
-- Settlement-consistency feedback for resolved binary markets.
-- Automatic historical market/relation snapshots with content-addressed deduplication.
-- Hard-negative and uncertainty-based review queue.
-- Historical replay using fixed, rematched, or originally captured relation graphs.
-- Offline threshold calibration over accumulated historical frames and adjudicated labels.
-- Frozen baseline regression gate in CI with explicit false-arbitrage protections.
-- Optional OpenAI semantic-verifier shadow mode with strict structured output and no influence on production relations or opportunities.
+- Full-depth books, fee-aware VWAP/slippage, quote freshness, and executable-size checks.
+- Live Polymarket/Kalshi books with relation-local recomputation.
+- SQLite/WAL operational state, labels, settlements, historical snapshots, and replay.
+- Precision/recall/F1 and `falseArbRate` evaluation plus frozen CI regression gates.
+- Optional OpenAI semantic verifier in shadow mode with no production influence.
+- Historical multi-model shadow A/B with prompt versioning, token/cost/latency accounting, and disagreement review.
 
 ## Requirements
 
 - Node.js **24.15+**
 - npm 11+
 
-The service uses Node's built-in `node:sqlite`; no native SQLite npm dependency is required.
+The service uses Node's built-in `node:sqlite`.
 
 Pinned package versions:
 
@@ -45,6 +36,7 @@ Pinned package versions:
 ```bash
 npm install
 npm run dev
+curl -X POST http://localhost:3000/v1/sync
 ```
 
 Default databases:
@@ -55,10 +47,22 @@ Default databases:
 ./data/pred-matcher-dataset.sqlite
 ```
 
-Manual catalog sync:
+## Production scanner
 
-```bash
-curl -X POST http://localhost:3000/v1/sync
+The production relation graph remains deterministic. `SIMILAR` is never arb-eligible. Opportunities use executable ask-side liquidity, full depth, fees, and quote freshness.
+
+Core endpoints:
+
+```text
+GET  /health
+GET  /ready
+GET  /metrics
+POST /v1/sync
+GET  /v1/markets
+GET  /v1/contracts?marketId=...
+GET  /v1/relations
+GET  /v1/opportunities
+GET  /v1/history
 ```
 
 Start live scanning:
@@ -68,42 +72,25 @@ curl -X POST http://localhost:3000/v1/live/start
 curl http://localhost:3000/v1/live/status
 ```
 
-## Durable operational state
+Kalshi live books require read credentials:
 
-`0.6.0+` persists markets, relations, current opportunities, lifecycle history, and last sync state in SQLite/WAL. A full sync replaces the catalog snapshot transactionally; live price changes use incremental writes.
+```bash
+export KALSHI_API_KEY_ID='...'
+export KALSHI_PRIVATE_KEY_PATH='/run/secrets/kalshi-read-key.pem'
+```
+
+Without them Kalshi live mode reports `DEGRADED` and retains the latest REST snapshot.
+
+## Persistence, quality, and historical data
 
 ```bash
 export PRED_MATCHER_DB_PATH='/var/lib/pred-matcher/state.sqlite'
-export PRED_MATCHER_HISTORY_LIMIT=20000
-export PRED_MATCHER_PERSISTENCE=true
-```
-
-Set `PRED_MATCHER_PERSISTENCE=false` for RAM-only operational state.
-
-## Matcher-quality data
-
-Relation labels, settlements, and semantic shadow observations live in a separate SQLite database:
-
-```bash
 export PRED_MATCHER_QUALITY_DB_PATH='/var/lib/pred-matcher/quality.sqlite'
+export PRED_MATCHER_DATASET_DB_PATH='/var/lib/pred-matcher/dataset.sqlite'
+export PRED_MATCHER_HISTORY_LIMIT=20000
 ```
 
-A label represents the adjudicated semantic relation for one market pair:
-
-```json
-{
-  "leftId": "polymarket:...",
-  "rightId": "kalshi:...",
-  "type": "EQUIVALENT",
-  "source": "ADJUDICATED",
-  "labeledAt": "2026-09-16T10:00:00Z",
-  "notes": "resolution rules checked manually"
-}
-```
-
-For `IMPLIES`, `THRESHOLD_NESTED`, and `TIME_NESTED`, include `direction`. `type: "NONE"` is the hard-negative gold label. `PSEUDO` labels are excluded from `/v1/quality/report` unless `includePseudo=true` is explicitly requested.
-
-Create/update a label and inspect current matcher quality:
+Gold relation labels use `MANUAL` or `ADJUDICATED` provenance. `PSEUDO` labels are excluded from normal quality/calibration/shadow A/B scoring unless explicitly requested by the corresponding legacy quality endpoint.
 
 ```bash
 curl -X POST http://localhost:3000/v1/quality/labels \
@@ -113,259 +100,136 @@ curl -X POST http://localhost:3000/v1/quality/labels \
 curl http://localhost:3000/v1/quality/report
 ```
 
-The report includes per-type and micro precision/recall/F1 plus `falseArbPredictions` and `falseArbRate`. False-arbitrage precision is the highest-priority matcher metric because false strong relations can create bad guaranteed-payout trades.
-
-## Historical dataset capture
-
-Automatic replay-ready capture uses a third SQLite database:
-
-```bash
-export PRED_MATCHER_DATASET_DB_PATH='/var/lib/pred-matcher/dataset.sqlite'
-```
-
-Defaults:
-
-```bash
-export PRED_MATCHER_DATASET_CAPTURE_MS=300000
-export PRED_MATCHER_DATASET_MAX_SNAPSHOTS=576
-export PRED_MATCHER_DATASET_AUTO_CAPTURE=true
-```
-
-Snapshots contain the normalized market catalog and relation graph observed at capture time. Storage is content-addressed: unchanged market/relation JSON is stored once in `market_versions` / `relation_versions`, while each snapshot references hashes. Retention deletes old snapshot links and garbage-collects unreferenced versions.
-
-Manual capture and inspection:
+Historical capture stores content-addressed market/relation versions and snapshot links:
 
 ```bash
 curl -X POST http://localhost:3000/v1/dataset/capture
-curl http://localhost:3000/v1/dataset/status
 curl 'http://localhost:3000/v1/dataset/snapshots?limit=100'
-curl 'http://localhost:3000/v1/dataset/frame?id=1'
-```
-
-## Review queue
-
-Every capture runs a wider semantic candidate pass (`minimumCandidateScore=0.20`) and persists pairs worth human review. It does **not** automatically create labels.
-
-- `HARD_NEGATIVE`: retrieval found a plausible pair but the verifier rejected a strong relation, or classified it only as `SIMILAR`.
-- `UNCERTAIN_RELATION`: an arb-eligible relation was emitted below the review-confidence threshold.
-
-```bash
 curl 'http://localhost:3000/v1/dataset/review?limit=100'
-curl 'http://localhost:3000/v1/dataset/review?kind=HARD_NEGATIVE&unlabeled=true'
-curl 'http://localhost:3000/v1/dataset/review?kind=UNCERTAIN_RELATION&unlabeled=false'
 ```
 
-Adjudication still goes through `POST /v1/quality/labels`; the review queue never promotes a near-miss to a gold label by itself.
+Replay supports `FIXED_RELATIONS`, `REMATCH`, and `CAPTURED_RELATIONS`.
 
-## Offline calibration
-
-The offline sweep varies both retrieval threshold and the minimum confidence accepted for arb-eligible relations. It does **not** automatically modify production matcher thresholds.
+## Calibration and regression gate
 
 ```bash
 npm run quality:sweep
-```
-
-Useful controls:
-
-```bash
-export PRED_MATCHER_CALIBRATION_FRAMES=500
-export PRED_MATCHER_CALIBRATION_CANDIDATE_SCORES='0.20,0.26,0.32,0.38,0.44'
-export PRED_MATCHER_CALIBRATION_ARB_CONFIDENCES='0,0.72,0.76,0.80,0.84,0.88,0.92'
-export PRED_MATCHER_CALIBRATION_MAX_FALSE_ARB_RATE=0
-export PRED_MATCHER_CALIBRATION_MIN_RECALL=0.80
-export PRED_MATCHER_CALIBRATION_MIN_ARB_PREDICTIONS=20
-export PRED_MATCHER_CALIBRATION_MIN_LABELED_PAIRS=100
-```
-
-`PSEUDO` labels are excluded unless `PRED_MATCHER_CALIBRATION_INCLUDE_PSEUDO=true` is explicitly set. Recommendation is advisory; production thresholds remain unchanged until deliberately changed in code/config.
-
-## Regression gate
-
-CI runs:
-
-```bash
 npm run quality:gate
 ```
 
-The gate evaluates the current matcher against `config/quality-regression-fixture.json` and compares it with a frozen baseline prediction set in the same fixture. The baseline is not recomputed using the candidate implementation.
-
-Default policy is fail-closed:
-
-- `falseArbRate` must remain `0`;
-- no increase in false-arbitrage rate is allowed;
-- no micro precision drop is allowed;
-- no micro recall drop is allowed;
-- the fixture must still produce the expected number of arb-eligible predictions.
-
-Do not silently loosen the regression policy to make CI pass.
+Calibration is advisory and never changes production thresholds automatically. CI's frozen fixture fails on configured false-arbitrage, precision, or recall regressions.
 
 ## Semantic verifier shadow mode
 
-`0.10.0` adds a pluggable semantic verifier after candidate retrieval. The OpenAI implementation uses the Responses API with strict JSON Schema output. Shadow output is **observational only**: it never replaces `store.listRelations()`, never creates an opportunity, and never changes matcher thresholds.
-
-Shadow mode is disabled by default so deployments do not unexpectedly incur external API cost. Enable manual shadow runs with:
+Shadow output is **observational only**: it never replaces production relations, never creates an opportunity, and provider failure does not fail catalog sync.
 
 ```bash
 export PRED_MATCHER_SHADOW_ENABLED=true
 export OPENAI_API_KEY='...'
-
-# Optional; default is the cost-oriented model below.
 export PRED_MATCHER_SHADOW_MODEL='gpt-5.6-luna'
 export PRED_MATCHER_SHADOW_MIN_CANDIDATE_SCORE=0.20
 export PRED_MATCHER_SHADOW_MAX_PAIRS=50
 export PRED_MATCHER_SHADOW_BATCH_SIZE=10
-export PRED_MATCHER_SHADOW_TIMEOUT_MS=45000
-```
 
-Run and inspect:
-
-```bash
-curl http://localhost:3000/v1/shadow/status
 curl -X POST http://localhost:3000/v1/shadow/run
-curl 'http://localhost:3000/v1/shadow/runs?limit=20'
-curl 'http://localhost:3000/v1/shadow/observations?limit=100'
 curl http://localhost:3000/v1/shadow/report
 ```
 
-Set `PRED_MATCHER_SHADOW_AUTO_RUN=true` only when you explicitly want a shadow pass after each successful catalog sync/refresh. Auto-run still remains fail-isolated from sync: provider errors are recorded/logged and do not alter the production relation graph.
+The verifier receives contract-semantic fields only: IDs, venue, title/subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. OpenAI Responses requests use `store: false`, and runtime API-key traffic is fixed to `https://api.openai.com/v1`.
 
-Selection prioritizes current arb-eligible relations, especially lower-confidence ones, followed by `SIMILAR` and rejected retrieval candidates. The semantic verifier is not shown the heuristic prediction, so disagreement measurement is less anchored to the current classifier.
+The model is not shown the heuristic prediction. The prompt used by the OpenAI provider is explicitly versioned as `semantic-contract-v1`.
 
-Only contract-semantic fields are sent to the verifier: IDs, venue, title, subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. Requests use `store: false`, and the runtime sends the API key only to the fixed OpenAI API origin.
+## Historical shadow A/B — v0.11.0
 
-Each observation persists:
-
-- provider/model and run ID;
-- heuristic type/confidence/direction;
-- shadow type/confidence/direction;
-- concise evidence and material differences;
-- observation timestamp.
-
-For labels that overlap the selected pairs, every completed run stores two apples-to-apples quality reports: current heuristic vs shadow verifier. A disagreement is measurement data, not an automatic gold label and not permission to trade.
-
-## Historical replay
-
-Replay supports three modes:
-
-- `FIXED_RELATIONS`: hold a supplied/current graph constant and isolate pricing/execution behavior.
-- `REMATCH`: rerun the current candidate retrieval + matcher on every historical frame.
-- `CAPTURED_RELATIONS`: use the relation graph stored with each historical frame, preserving what the matcher believed at that time.
-
-Dataset-backed replay:
+Historical evaluation is an explicit CLI operation, not part of normal sync, so multi-model spend cannot start accidentally:
 
 ```bash
-curl -X POST http://localhost:3000/v1/dataset/replay \
-  -H 'content-type: application/json' \
-  -d '{"mode":"CAPTURED_RELATIONS","limit":288,"minimumNetEdge":0,"maxQuoteAgeMs":15000,"includeStale":false}'
+export OPENAI_API_KEY='...'
+export PRED_MATCHER_SHADOW_MODELS='gpt-5.6-luna,gpt-5.6-terra'
+export PRED_MATCHER_SHADOW_BACKFILL_FRAMES=100
+export PRED_MATCHER_SHADOW_BACKFILL_MAX_PAIRS=300
+export PRED_MATCHER_SHADOW_BATCH_SIZE=10
+npm run shadow:backfill
 ```
 
-## Settlement feedback
+If `PRED_MATCHER_SHADOW_MODELS` is omitted, the CLI uses `PRED_MATCHER_SHADOW_MODEL`, then falls back to the single model `gpt-5.6-luna`.
+
+The experiment runner:
+
+1. loads saved dataset frames;
+2. retrieves and prioritizes semantic candidate pairs;
+3. deduplicates by pair and gives **the same selected pair set** to every model;
+4. records one model run per verifier under a common `experimentId`;
+5. evaluates heuristic and model predictions only on overlapping non-`PSEUDO` gold labels;
+6. compares exact relation+direction signatures model-to-model;
+7. creates review candidates for gold-label, model-model, and model-heuristic disagreements.
+
+Inspect experiments and review candidates:
 
 ```bash
-curl -X POST http://localhost:3000/v1/quality/settlements \
-  -H 'content-type: application/json' \
-  -d '{"marketId":"kalshi:...","outcome":"YES","resolvedAt":"2026-09-16T10:00:00Z"}'
+curl 'http://localhost:3000/v1/shadow/experiments?limit=20'
+curl 'http://localhost:3000/v1/shadow/experiment?id=EXPERIMENT_ID'
+curl 'http://localhost:3000/v1/shadow/review?experimentId=EXPERIMENT_ID&limit=100'
 ```
 
-`GET /v1/quality/settlement-report` reports `CONSISTENT`, `VIOLATED`, or `INCONCLUSIVE`. This is negative-evidence oriented: a violating outcome is strong evidence against a relation; a non-violating outcome does not prove equivalence.
+### Usage and cost accounting
 
-## Catalog refresh and live data
+Each shadow run records request count, input/cached/cache-write/output/total tokens, cumulative request latency, and estimated USD cost.
 
-Periodic refresh is enabled by default every five minutes:
+Cost is an **estimate, not billing truth**. `0.11.0` uses the pricing snapshot **2026-09-16** for exact known model IDs:
 
-```bash
-export PRED_MATCHER_CATALOG_REFRESH_MS=300000
-export PRED_MATCHER_CATALOG_AUTO_REFRESH=true
+| Model | Input / 1M | Cached input / 1M | Output / 1M |
+| --- | ---: | ---: | ---: |
+| `gpt-5.6-luna` | $0.20 | $0.02 | $1.20 |
+| `gpt-5.6-terra` | $2.00 | $0.20 | $12.00 |
+| `gpt-5.6-sol` / `gpt-5.6` | $4.00 | $0.40 | $20.00 |
+
+Cache-write tokens are estimated at 1.25× the uncached-input price. Unknown model IDs return `estimatedCostUsd: null` instead of guessing. OpenAI billing remains authoritative, and future pricing or special long-context pricing can differ from this snapshot.
+
+Official references used for this snapshot:
+
+- https://developers.openai.com/api/reference/cli/resources/responses/methods/create
+- https://developers.openai.com/api/docs/models/gpt-5.6-luna
+- https://developers.openai.com/api/docs/models/gpt-5.6-terra
+- https://developers.openai.com/api/docs/models/gpt-5.6-sol
+
+## Shadow API
+
+```text
+GET  /v1/shadow/status
+POST /v1/shadow/run
+GET  /v1/shadow/runs?limit=...
+GET  /v1/shadow/observations?limit=...&runId=...
+GET  /v1/shadow/report?runId=...
+GET  /v1/shadow/experiments?limit=...
+GET  /v1/shadow/experiment?id=...
+GET  /v1/shadow/review?experimentId=...&limit=...
 ```
 
-WebSocket sharding defaults:
-
-```bash
-export PRED_MATCHER_POLYMARKET_WS_MARKETS_PER_CONNECTION=250
-export PRED_MATCHER_KALSHI_WS_MARKETS_PER_CONNECTION=200
-```
-
-Kalshi live market data requires read credentials:
-
-```bash
-export KALSHI_API_KEY_ID='...'
-export KALSHI_PRIVATE_KEY_PATH='/run/secrets/kalshi-read-key.pem'
-```
-
-Without credentials, Kalshi live mode reports `DEGRADED` and continues to expose the most recent REST snapshot.
-
-## Health and observability
-
-- `GET /health`: operational, quality, dataset, catalog/live/capture, and shadow-verifier status.
-- `GET /ready`: `200` only after restored/current sync state exists and all required SQLite stores are healthy. Optional shadow-provider failure does not make the scanner unready.
-- `GET /metrics`: Prometheus scanner/runtime metrics.
-- `GET /v1/quality/status`: labels, settlements, shadow-run and shadow-observation persistence counts.
-- `GET /v1/dataset/status`: historical dataset database + capture scheduler status.
-
-## API
-
-Core:
-
-- `POST /v1/sync`
-- `GET /v1/catalog/status`
-- `POST /v1/catalog/refresh`
-- `POST /v1/live/start`
-- `POST /v1/live/stop`
-- `GET /v1/live/status`
-- `GET /v1/history`
-- `GET /v1/markets`
-- `GET /v1/contracts`
-- `GET /v1/relations`
-- `GET /v1/opportunities`
-
-Quality/replay:
-
-- `GET /v1/quality/status`
-- `GET /v1/quality/labels`
-- `POST /v1/quality/labels`
-- `GET /v1/quality/candidates?unlabeled=true`
-- `GET /v1/quality/report?includePseudo=false`
-- `GET /v1/quality/settlements`
-- `POST /v1/quality/settlements`
-- `GET /v1/quality/settlement-report`
-- `POST /v1/replay`
-
-Dataset:
-
-- `GET /v1/dataset/status`
-- `POST /v1/dataset/capture`
-- `GET /v1/dataset/snapshots?limit=...&from=...&to=...`
-- `GET /v1/dataset/frame?id=...`
-- `GET /v1/dataset/review?limit=...&kind=...&unlabeled=true|false`
-- `POST /v1/dataset/replay`
-
-Shadow verifier:
-
-- `GET /v1/shadow/status`
-- `POST /v1/shadow/run`
-- `GET /v1/shadow/runs?limit=...`
-- `GET /v1/shadow/observations?limit=...&runId=...`
-- `GET /v1/shadow/report?runId=...`
+Shadow observations/review candidates never become gold labels automatically.
 
 ## Versioning
 
 The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 
-- `0.1.0`: runnable cross-venue matcher MVP.
-- `0.2.0`: structured contract verification and richer relation classes.
-- `0.3.0`: top-of-book gross opportunity engine.
-- `0.4.0`: full-depth VWAP, fees, freshness, and net executable estimates.
-- `0.5.0`: live WebSocket scanner and incremental lifecycle history.
-- `0.6.0`: durable operational state, refresh scheduler, observability, and WS sharding.
-- `0.7.0`: durable relation labels, matcher-quality metrics, settlement feedback, and historical replay.
-- `0.8.0`: automatic deduplicated historical dataset capture, review queues, and captured-relation replay.
-- `0.9.0`: offline threshold calibration, Pareto quality analysis, frozen baseline regression fixture, and CI quality gate.
-- `0.10.0`: pluggable semantic-verifier shadow mode with persisted disagreement/quality observations.
+- `0.1.0`: runnable matcher MVP.
+- `0.2.0`: structured contract verification.
+- `0.3.0`: gross opportunity engine.
+- `0.4.0`: full-depth fee-aware executable estimates.
+- `0.5.0`: live WebSocket scanner.
+- `0.6.0`: durable state and observability.
+- `0.7.0`: labels, quality metrics, settlement feedback, replay.
+- `0.8.0`: historical dataset capture and review queue.
+- `0.9.0`: offline calibration and CI regression gate.
+- `0.10.0`: semantic verifier shadow mode.
+- `0.11.0`: historical shadow backfill, model A/B, prompt versioning, usage/cost accounting, disagreement review.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
 ## Important limitations
 
-`0.10.0` remains a scanner, not an atomic two-venue execution engine. The semantic verifier is intentionally not trusted for production classification yet. LLM confidence is not semantic truth; promotion out of shadow mode requires enough adjudicated coverage to demonstrate improvement, especially no increase in `falseArbRate`, through the existing calibration/regression framework.
+This remains a scanner, not an atomic two-venue execution engine. Cross-venue fills can race and settlement/venue risk remains.
 
-Historical capture is sampled rather than tick-complete. Calibration quality is bounded by gold-label coverage. The committed CI fixture is intentionally small and deterministic and does not replace evaluation on the accumulated dataset. SQLite stores remain single-process; distributed deployment should move persistence interfaces to a shared transactional database.
+Historical capture is sampled rather than tick-complete. Historical shadow experiments currently deduplicate repeated frames by market pair rather than evaluating every semantic version of the same pair.
+
+LLM confidence is not semantic truth. Shadow output stays non-production until enough adjudicated coverage demonstrates better precision/recall without increasing `falseArbRate`. Pricing estimates are informational only. SQLite remains single-process; distributed deployment should move persistence interfaces to a shared transactional database.

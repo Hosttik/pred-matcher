@@ -17,7 +17,7 @@ import { SqliteStateRepository } from "./service/sqlite-state.js";
 import { MemoryStore } from "./service/store.js";
 import { syncAll } from "./service/sync.js";
 
-const VERSION = "0.10.0";
+const VERSION = "0.11.0";
 const STARTED_AT_MS = Date.now();
 
 function configuredPositiveInt(name: string, fallback: number): number {
@@ -198,10 +198,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
 
   if (request.method === "POST" && url.pathname === "/v1/sync") {
-    if (activeSync) {
-      json(response, 409, { error: "sync_already_running" });
-      return;
-    }
+    if (activeSync) { json(response, 409, { error: "sync_already_running" }); return; }
     json(response, 200, await performSync());
     return;
   }
@@ -212,10 +209,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
 
   if (request.method === "POST" && url.pathname === "/v1/catalog/refresh") {
-    if (activeSync) {
-      json(response, 409, { error: "sync_already_running" });
-      return;
-    }
+    if (activeSync) { json(response, 409, { error: "sync_already_running" }); return; }
     json(response, 200, await performSync());
     return;
   }
@@ -224,13 +218,11 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     json(response, 200, liveScanner.getStatus());
     return;
   }
-
   if (request.method === "POST" && url.pathname === "/v1/live/start") {
     if (!store.getLastSync()) await performSync();
     json(response, 200, await liveScanner.start());
     return;
   }
-
   if (request.method === "POST" && url.pathname === "/v1/live/stop") {
     json(response, 200, liveScanner.stop());
     return;
@@ -239,10 +231,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "GET" && url.pathname === "/v1/history") {
     const rawLimit = url.searchParams.get("limit");
     const limit = rawLimit === null ? 100 : Number(rawLimit);
-    if (!Number.isFinite(limit) || limit < 1) {
-      json(response, 400, { error: "invalid_limit" });
-      return;
-    }
+    if (!Number.isFinite(limit) || limit < 1) { json(response, 400, { error: "invalid_limit" }); return; }
     const opportunityId = url.searchParams.get("opportunityId") ?? undefined;
     const history = store.listHistory(limit, opportunityId);
     json(response, 200, { count: history.length, history });
@@ -259,15 +248,9 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
 
   if (request.method === "GET" && url.pathname === "/v1/contracts") {
     const marketId = url.searchParams.get("marketId");
-    if (!marketId) {
-      json(response, 400, { error: "market_id_required" });
-      return;
-    }
+    if (!marketId) { json(response, 400, { error: "market_id_required" }); return; }
     const market = store.getMarket(marketId);
-    if (!market) {
-      json(response, 404, { error: "market_not_found" });
-      return;
-    }
+    if (!market) { json(response, 404, { error: "market_not_found" }); return; }
     json(response, 200, { marketId: market.id, contract: buildContractSpec(market) });
     return;
   }
@@ -282,29 +265,17 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "GET" && url.pathname === "/v1/opportunities") {
     const typeParam = url.searchParams.get("type");
     const type = opportunityType(typeParam);
-    if (typeParam && !type) {
-      json(response, 400, { error: "invalid_opportunity_type" });
-      return;
-    }
+    if (typeParam && !type) { json(response, 400, { error: "invalid_opportunity_type" }); return; }
     const minimumGrossEdge = nonNegativeNumber(url.searchParams.get("minGrossEdge"), 0);
     const minimumNetEdge = nonNegativeNumber(url.searchParams.get("minNetEdge"), 0);
     const maxQuoteAgeMs = positiveNumber(url.searchParams.get("maxQuoteAgeMs")) ?? 15_000;
     const targetParam = url.searchParams.get("targetShares");
     const targetShares = positiveNumber(targetParam);
-    if (minimumGrossEdge === undefined || minimumNetEdge === undefined) {
-      json(response, 400, { error: "invalid_edge_filter" });
-      return;
-    }
-    if (targetParam !== null && targetShares === undefined) {
-      json(response, 400, { error: "invalid_target_shares" });
-      return;
-    }
+    if (minimumGrossEdge === undefined || minimumNetEdge === undefined) { json(response, 400, { error: "invalid_edge_filter" }); return; }
+    if (targetParam !== null && targetShares === undefined) { json(response, 400, { error: "invalid_target_shares" }); return; }
     const includeStale = url.searchParams.get("includeStale") === "true";
     const opportunities = findOpportunities(store.listMarkets(), store.listRelations(), {
-      minimumGrossEdge,
-      minimumNetEdge,
-      maxQuoteAgeMs,
-      includeStale,
+      minimumGrossEdge, minimumNetEdge, maxQuoteAgeMs, includeStale,
       ...(targetShares !== undefined ? { targetShares } : {})
     }).filter((opportunity) => !type || opportunity.type === type);
     json(response, 200, {
@@ -350,11 +321,7 @@ async function initializeRuntime(): Promise<void> {
   if (autoLive && store.getLastSync()) await liveScanner.start();
   if (autoDataset) datasetCaptureScheduler.start(true);
   if (autoShadow && store.getLastSync() && !synced) {
-    try {
-      await shadowVerifier.run();
-    } catch (error) {
-      console.error("initial shadow verification failed", error);
-    }
+    try { await shadowVerifier.run(); } catch (error) { console.error("initial shadow verification failed", error); }
   }
 }
 

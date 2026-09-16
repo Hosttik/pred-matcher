@@ -68,9 +68,11 @@ describe("QualityRepository", () => {
       expect(second.listShadowVerifications({ runId: "run-1" })[0]?.type).toBe("IMPLIES");
       expect(second.status()).toMatchObject({
         healthy: true,
-        schemaVersion: 2,
+        schemaVersion: 3,
         shadowRuns: 1,
-        shadowVerifications: 1
+        shadowVerifications: 1,
+        shadowExperiments: 0,
+        shadowReviewCandidates: 0
       });
       second.close();
     } finally {
