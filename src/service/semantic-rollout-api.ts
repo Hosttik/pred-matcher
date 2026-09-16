@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { attributeVetoDecisions, cohortRolloutDecisions } from "../core/rollout-evidence.js";
+import { attributeVetoDecisions, cohortRolloutDecisions, deriveRolloutEvents } from "../core/rollout-evidence.js";
 import type { QualityRepository } from "./quality-repository.js";
 import type { SemanticVetoService } from "./semantic-veto.js";
 
@@ -36,6 +36,14 @@ export async function handleSemanticRolloutRequest(
     if (limit === undefined) { json(response, 400, { error: "invalid_limit" }); return true; }
     const evidence = repository.listRolloutEvidence(limit);
     json(response, 200, { count: evidence.length, evidence });
+    return true;
+  }
+  if (request.method === "GET" && url.pathname === "/v1/semantic/events") {
+    const limit = boundedLimit(url.searchParams.get("limit"), 500, 5000);
+    if (limit === undefined) { json(response, 400, { error: "invalid_limit" }); return true; }
+    const evidence = repository.listRolloutEvidence(limit);
+    const events = deriveRolloutEvents(evidence);
+    json(response, 200, { count: events.length, events });
     return true;
   }
   if (request.method === "GET" && url.pathname === "/v1/semantic/decisions") {
