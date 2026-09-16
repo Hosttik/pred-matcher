@@ -12,6 +12,8 @@ const ARB_ELIGIBLE = new Set<RelationType>([
 export interface SemanticPromotionPolicy {
   model: string;
   promptVersion: string;
+  matcherVersion: string;
+  maximumEvidenceAgeMs: number;
   minimumLabeledPairs: number;
   minimumRetainedArbPredictions: number;
   maximumFalseArbRateUpperBound: number;
@@ -26,7 +28,12 @@ export interface SemanticPromotionReport {
   eligible: boolean;
   model: string;
   promptVersion: string;
+  matcherVersion: string;
   evaluatedAt: string;
+  evidenceCutoffAt: string;
+  oldestEvidenceAt: string | null;
+  newestEvidenceAt: string | null;
+  newestEvidenceAgeMs: number | null;
   historicalRuns: number;
   observations: number;
   labeledPairs: number;
@@ -91,6 +98,11 @@ function delta(candidate: number | null, baseline: number | null): number | null
   return round(candidate - baseline);
 }
 
+function validTimestamp(value: string): number | undefined {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export function latestObservationsByPair(
   observations: readonly ShadowVerificationObservation[]
 ): ShadowVerificationObservation[] {
@@ -107,11 +119,23 @@ export function evaluateSemanticPromotion(
   observations: readonly ShadowVerificationObservation[],
   labels: readonly RelationLabel[],
   policy: SemanticPromotionPolicy,
-  historicalRuns: number
+  historicalRuns: number,
+  nowMs = Date.now()
 ): SemanticPromotionReport {
-  const latest = latestObservationsByPair(observations).filter((observation) =>
-    observation.model === policy.model && observation.promptVersion === policy.promptVersion
+  const maximumEvidenceAgeMs = Number.isFinite(policy.maximumEvidenceAgeMs) && policy.maximumEvidenceAgeMs > 0
+    ? policy.maximumEvidenceAgeMs
+    : 1;
+  const cutoffMs = nowMs - maximumEvidenceAgeMs;
+  const matching = observations.filter((observation) =>
+    observation.model === policy.model &&
+    observation.promptVersion === policy.promptVersion &&
+    observation.matcherVersion === policy.matcherVersion
   );
+  const fresh = matching.filter((observation) => {
+    const observedAt = validTimestamp(observation.observedAt);
+    return observedAt !== undefined && observedAt >= cutoffMs && observedAt <= nowMs;
+  });
+  const latest = latestObservationsByPair(fresh);
   const observationKeys = new Set(latest.map((observation) => relationPairKey(observation.leftId, observation.rightId)));
   const evaluatedLabels = labels.filter((label) =>
     label.source !== "PSEUDO" && observationKeys.has(relationPairKey(label.leftId, label.rightId))
@@ -140,9 +164,17 @@ export function evaluateSemanticPromotion(
   );
   const microPrecisionDelta = delta(candidate.micro.precision, baseline.micro.precision);
   const recallDelta = delta(candidate.micro.recall, baseline.micro.recall);
+  const evidenceTimes = latest
+    .map((observation) => validTimestamp(observation.observedAt))
+    .filter((value): value is number => value !== undefined)
+    .sort((a, b) => a - b);
+  const oldestEvidenceMs = evidenceTimes[0];
+  const newestEvidenceMs = evidenceTimes.at(-1);
   const reasons: string[] = [];
 
   if (historicalRuns < 1) reasons.push("no_completed_historical_runs");
+  if (matching.length === 0) reasons.push("no_matcher_pinned_evidence");
+  else if (fresh.length === 0) reasons.push("promotion_evidence_expired");
   if (evaluatedLabels.length < policy.minimumLabeledPairs) {
     reasons.push(`insufficient_labeled_pairs:${evaluatedLabels.length}<${policy.minimumLabeledPairs}`);
   }
@@ -173,7 +205,12 @@ export function evaluateSemanticPromotion(
     eligible: reasons.length === 0,
     model: policy.model,
     promptVersion: policy.promptVersion,
-    evaluatedAt: new Date().toISOString(),
+    matcherVersion: policy.matcherVersion,
+    evaluatedAt: new Date(nowMs).toISOString(),
+    evidenceCutoffAt: new Date(cutoffMs).toISOString(),
+    oldestEvidenceAt: oldestEvidenceMs === undefined ? null : new Date(oldestEvidenceMs).toISOString(),
+    newestEvidenceAt: newestEvidenceMs === undefined ? null : new Date(newestEvidenceMs).toISOString(),
+    newestEvidenceAgeMs: newestEvidenceMs === undefined ? null : Math.max(0, nowMs - newestEvidenceMs),
     historicalRuns,
     observations: latest.length,
     labeledPairs: evaluatedLabels.length,
