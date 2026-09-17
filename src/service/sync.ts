@@ -10,6 +10,7 @@ import { compareOpportunitySets } from "../core/rollout.js";
 import type { SemanticRolloutEvidence, SemanticVetoDecisionEvidence } from "../core/rollout-evidence.js";
 import type { MarketRelation, NormalizedMarket, SyncResult } from "../core/types.js";
 import type { CanaryEnforcementService } from "./canary-enforcement.js";
+import { getCanaryEnforcementService } from "./canary-runtime.js";
 import type { QualityRepository } from "./quality-repository.js";
 import type { SemanticVetoService } from "./semantic-veto.js";
 import { MemoryStore } from "./store.js";
@@ -72,36 +73,38 @@ export async function syncAll(
   let enforcedVetoPairs = new Set<string>();
 
   if (semantic && semanticVeto) {
+    const requestedMode = semanticVeto.mode === "ENFORCED" ? "ENFORCED" : semanticVeto.mode === "AUTO" ? "AUTO" : "DRY_RUN";
+    const restored = store.getLastSync()?.semanticPolicy;
+    const compatibleInitial = restored &&
+      restored.requestedMode === requestedMode &&
+      restored.matcherVersion === semantic.matcherVersion &&
+      restored.model === semantic.model &&
+      restored.promptVersion === semantic.promptVersion
+      ? restored.canary
+      : undefined;
+    const activeCanary = canaryEnforcement ?? getCanaryEnforcementService(semanticVeto.mode, compatibleInitial);
     const candidateOpportunities = findOpportunities(hydratedMarkets, semantic.proposedRelations, opportunityOptions);
     const opportunityImpact = compareOpportunitySets(baselineOpportunities, candidateOpportunities);
     const rollout = semanticVeto.finalize(semantic, opportunityImpact);
-    let canary = canaryEnforcement?.getStatus();
+    let canary = activeCanary.getStatus();
 
     if (rollout.effectiveMode === "ENFORCED") {
-      if (canaryEnforcement) {
-        const canaryResult = canaryEnforcement.apply(
-          hydratedMarkets,
-          matched.relations,
-          semantic.decisions,
-          baselineOpportunities,
-          candidateOpportunities,
-          rollout.safe
-        );
-        relations = canaryResult.relations;
-        opportunities = findOpportunities(hydratedMarkets, relations, opportunityOptions);
-        canary = canaryResult.snapshot;
-        enforcedVetoPairs = canaryResult.enforcedVetoPairs;
-      } else {
-        relations = semantic.proposedRelations;
-        opportunities = candidateOpportunities;
-        enforcedVetoPairs = new Set(semantic.decisions.filter((decision) => decision.action === "VETOED").map((decision) =>
-          relationPairKey(decision.relation.leftId, decision.relation.rightId)
-        ));
-      }
+      const canaryResult = activeCanary.apply(
+        hydratedMarkets,
+        matched.relations,
+        semantic.decisions,
+        baselineOpportunities,
+        candidateOpportunities,
+        rollout.safe
+      );
+      relations = canaryResult.relations;
+      opportunities = findOpportunities(hydratedMarkets, relations, opportunityOptions);
+      canary = canaryResult.snapshot;
+      enforcedVetoPairs = canaryResult.enforcedVetoPairs;
     }
 
     semanticPolicy = {
-      requestedMode: semanticVeto.mode === "ENFORCED" ? "ENFORCED" : semanticVeto.mode === "AUTO" ? "AUTO" : "DRY_RUN",
+      requestedMode,
       effectiveMode: rollout.effectiveMode,
       gateEligible: semantic.gateEligible,
       safe: rollout.safe,
@@ -120,7 +123,7 @@ export async function syncAll(
       opportunityImpact,
       guardReasons: rollout.guardReasons,
       circuitBreaker: rollout.circuitBreaker,
-      ...(canary ? { canary } : {}),
+      canary,
       requests: semantic.usage.requests,
       estimatedCostUsd: semantic.usage.estimatedCostUsd,
       ...(semantic.providerError ? { providerError: semantic.providerError } : {})
@@ -147,7 +150,7 @@ export async function syncAll(
       opportunityImpact,
       guardReasons: semanticPolicy.guardReasons,
       circuitOpen: semanticPolicy.circuitBreaker.open,
-      ...(semanticPolicy.canary ? { canary: semanticPolicy.canary } : {})
+      canary: semanticPolicy.canary
     };
     const marketById = new Map(hydratedMarkets.map((market) => [market.id, market]));
     const suppressedPairs = suppressedOpportunityPairs(baselineOpportunities, candidateOpportunities);
