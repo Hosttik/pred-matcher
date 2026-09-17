@@ -258,6 +258,42 @@ export interface SemanticCircuitBreakerState {
   openedAt?: string;
 }
 
+export interface SemanticCanaryCohortState {
+  key: string;
+  relationType: RelationType;
+  venuePair: string;
+  stageIndex: number;
+  exposure: number;
+  safeStreak: number;
+  circuitOpen: boolean;
+  reasons: string[];
+  openedAt?: string;
+  decisions: number;
+  vetoed: number;
+  vetoRate: number;
+  baselineOpportunities: number;
+  suppressedOpportunities: number;
+  opportunityRetentionRate: number | null;
+  enforcedVetoes: number;
+  advancedThisSync: boolean;
+  trippedThisSync: boolean;
+}
+
+export interface SemanticCanarySyncResult {
+  enabled: boolean;
+  stages: number[];
+  safeSyncsPerStage: number;
+  minimumDecisions: number;
+  maximumVetoRate: number;
+  minimumOpportunityRetentionRate: number;
+  cohorts: SemanticCanaryCohortState[];
+  aggregateExposure: number;
+  eligibleVetoes: number;
+  enforcedVetoes: number;
+  advancedCohorts: number;
+  trippedCohorts: number;
+}
+
 export interface SemanticPolicySyncResult {
   requestedMode: Exclude<SemanticRolloutMode, "OFF">;
   effectiveMode: "DRY_RUN" | "ENFORCED";
@@ -278,6 +314,7 @@ export interface SemanticPolicySyncResult {
   opportunityImpact: SemanticOpportunityImpact;
   guardReasons: string[];
   circuitBreaker: SemanticCircuitBreakerState;
+  canary?: SemanticCanarySyncResult;
   requests: number;
   estimatedCostUsd: number | null;
   providerError?: string;
