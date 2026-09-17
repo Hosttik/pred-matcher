@@ -106,6 +106,20 @@ export class CanaryEnforcementService {
 
     for (const cohort of options.initial?.cohorts ?? []) {
       const stageIndex = Math.min(Math.max(cohort.stageIndex, 0), this.stages.length - 1);
+      const restored: SemanticCanaryCohortState = {
+        ...cohort,
+        stageIndex,
+        exposure: cohort.circuitOpen ? 0 : this.stages[stageIndex] ?? 0,
+        advancedThisSync: false,
+        trippedThisSync: false,
+        decisions: 0,
+        vetoed: 0,
+        vetoRate: 0,
+        baselineOpportunities: 0,
+        suppressedOpportunities: 0,
+        opportunityRetentionRate: null,
+        enforcedVetoes: 0
+      };
       this.states.set(cohort.key, {
         relationType: cohort.relationType,
         venuePair: cohort.venuePair,
@@ -114,11 +128,11 @@ export class CanaryEnforcementService {
         circuitOpen: cohort.circuitOpen,
         reasons: [...cohort.reasons],
         ...(cohort.openedAt ? { openedAt: cohort.openedAt } : {}),
-        last: cohort
+        last: restored
       });
     }
 
-    this.lastSnapshot = options.initial ?? this.emptySnapshot();
+    this.lastSnapshot = this.snapshotFromStates();
   }
 
   private emptySnapshot(): SemanticCanarySyncResult {
@@ -212,6 +226,7 @@ export class CanaryEnforcementService {
       return { relations, snapshot: this.lastSnapshot, enforcedVetoPairs: vetoPairs };
     }
 
+    for (const state of this.states.values()) delete state.last;
     const marketById = new Map(markets.map((market) => [market.id, market]));
     const baselineCounts = opportunityCountByPair(baselineOpportunities);
     const suppressedCounts = suppressedOpportunityCountByPair(baselineOpportunities, fullCandidateOpportunities);
