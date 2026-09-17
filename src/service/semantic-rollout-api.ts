@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { attributeVetoDecisions, cohortRolloutDecisions, deriveRolloutEvents } from "../core/rollout-evidence.js";
+import type { CanaryEnforcementService } from "./canary-enforcement.js";
 import type { QualityRepository } from "./quality-repository.js";
 import type { SemanticVetoService } from "./semantic-veto.js";
 
@@ -19,12 +20,13 @@ export async function handleSemanticRolloutRequest(
   response: ServerResponse,
   url: URL,
   repository: QualityRepository,
-  semanticVeto: SemanticVetoService
+  semanticVeto: SemanticVetoService,
+  canary?: CanaryEnforcementService
 ): Promise<boolean> {
   if (!url.pathname.startsWith("/v1/semantic/")) return false;
 
   if (request.method === "GET" && url.pathname === "/v1/semantic/status") {
-    json(response, 200, semanticVeto.getStatus());
+    json(response, 200, { ...semanticVeto.getStatus(), ...(canary ? { canary: canary.getStatus() } : {}) });
     return true;
   }
   if (request.method === "POST" && url.pathname === "/v1/semantic/circuit/reset") {
@@ -33,6 +35,16 @@ export async function handleSemanticRolloutRequest(
       ...status,
       requiresSyncBeforeEnforcement: semanticVeto.mode === "ENFORCED" || semanticVeto.mode === "AUTO"
     });
+    return true;
+  }
+  if (request.method === "GET" && url.pathname === "/v1/semantic/canary/status") {
+    json(response, 200, canary?.getStatus() ?? { enabled: false });
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/semantic/canary/reset") {
+    if (!canary) { json(response, 409, { error: "canary_not_configured" }); return true; }
+    const cohort = url.searchParams.get("cohort")?.trim() || undefined;
+    json(response, 200, canary.reset(cohort));
     return true;
   }
   if (request.method === "GET" && url.pathname === "/v1/semantic/evidence") {
