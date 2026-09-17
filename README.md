@@ -2,7 +2,7 @@
 
 Durable prediction-market semantic matcher and executable-opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.14.0**.
+Current version: **0.15.0**.
 
 ## Scope
 
@@ -15,7 +15,7 @@ Current version: **0.14.0**.
 - OpenAI semantic verifier in observational shadow mode.
 - Historical multi-model A/B with prompt/model/matcher versioning, usage/cost accounting, and disagreement review.
 - Statistical semantic promotion gate.
-- Controlled production rollout with `DRY_RUN`, `AUTO`, `ENFORCED`, durable rollout evidence, opportunity-impact accounting, and a latching circuit breaker.
+- Controlled semantic rollout with `DRY_RUN`, `AUTO`, `ENFORCED`, durable rollout evidence, cohort canaries, and latching circuit breakers.
 
 ## Requirements
 
@@ -62,7 +62,9 @@ GET  /v1/semantic/events
 GET  /v1/semantic/decisions
 GET  /v1/semantic/cohorts
 GET  /v1/semantic/attribution
+GET  /v1/semantic/canary/status
 POST /v1/semantic/circuit/reset
+POST /v1/semantic/canary/reset?cohort=...
 ```
 
 Start live scanning:
@@ -137,11 +139,11 @@ curl http://localhost:3000/v1/shadow/report
 
 The verifier receives contract-semantic fields only: IDs, venue, title/subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. OpenAI Responses requests use `store: false`, and runtime API-key traffic is fixed to `https://api.openai.com/v1`.
 
-The OpenAI prompt is versioned as `semantic-contract-v1`. New shadow observations also store the deterministic matcher version (`heuristic-v1`). Matcher-version provenance is separate from the package version: any future semantic matcher change must bump that matcher version before promotion evidence can be reused.
+The prompt is versioned as `semantic-contract-v1`. Shadow observations also store the deterministic matcher version (`heuristic-v1`). Matcher provenance is independent from package SemVer; changing deterministic matcher semantics requires a matcher-version bump before promotion evidence can be reused.
 
 ## Historical shadow A/B
 
-Historical evaluation is an explicit CLI operation, not part of normal sync:
+Historical evaluation is explicit and not part of normal sync:
 
 ```bash
 export OPENAI_API_KEY='...'
@@ -152,7 +154,7 @@ export PRED_MATCHER_SHADOW_BATCH_SIZE=10
 npm run shadow:backfill
 ```
 
-Every configured model receives the same deduplicated selected pair set. Runs persist prompt/model/matcher identity, token usage, cumulative latency, estimated cost, quality on overlapping gold labels, pairwise model disagreement, and review candidates.
+Every configured model receives the same deduplicated selected pair set. Runs persist prompt/model/matcher identity, token usage, cumulative latency, estimated cost, quality on overlapping gold labels, pairwise disagreement, and review candidates.
 
 ```bash
 curl 'http://localhost:3000/v1/shadow/experiments?limit=20'
@@ -168,7 +170,7 @@ Promotion evaluates the **combined heuristic + semantic veto policy**, not the L
 
 Default promotion requirements:
 
-- exact model pin, prompt-version pin, and matcher-version pin;
+- exact model, prompt-version, and matcher-version pins;
 - evidence no older than 7 days;
 - at least 100 overlapping non-`PSEUDO` labeled pairs;
 - at least 75 arb-eligible predictions retained after veto;
@@ -189,8 +191,6 @@ export PRED_MATCHER_PROMOTED_MATCHER_VERSION='heuristic-v1'
 npm run shadow:promotion
 curl http://localhost:3000/v1/shadow/promotion
 ```
-
-`npm run shadow:promotion` exits non-zero when the gate is ineligible or when the promoted matcher pin is not the current matcher version.
 
 Useful policy controls:
 
@@ -213,11 +213,11 @@ Historical runs created before matcher-version provenance was introduced do not 
 Four rollout modes are supported:
 
 - `OFF`: deterministic matcher only; no semantic production call.
-- `DRY_RUN`: run semantic veto and compute what it would suppress, but persist the original deterministic relation graph and opportunities.
-- `AUTO`: behave as `DRY_RUN` until a configured number of consecutive safe semantic syncs has been observed, then automatically transition to `ENFORCED`.
-- `ENFORCED`: apply semantic veto while promotion and runtime guards remain safe.
+- `DRY_RUN`: run semantic veto and compute what it would suppress, but persist the deterministic baseline.
+- `AUTO`: start as `DRY_RUN`; after the configured global safe streak, enter enforcement. In `0.15.0`, AUTO enforcement is canary-gated by default.
+- `ENFORCED`: apply semantic veto while promotion and runtime guards remain safe. Existing full-enforcement behavior is preserved unless canary is explicitly enabled.
 
-The legacy value `PRED_MATCHER_SEMANTIC_MODE=VETO_ONLY` remains a backward-compatible alias for `ENFORCED`.
+`PRED_MATCHER_SEMANTIC_MODE=VETO_ONLY` remains a backward-compatible alias for `ENFORCED`.
 
 Recommended rollout:
 
@@ -228,20 +228,11 @@ export PRED_MATCHER_PROMOTED_MODEL='gpt-5.6-luna'
 export PRED_MATCHER_PROMOTED_PROMPT_VERSION='semantic-contract-v1'
 export PRED_MATCHER_PROMOTED_MATCHER_VERSION='heuristic-v1'
 
-# Automatic DRY_RUN -> ENFORCED after 12 consecutive safe syncs.
 export PRED_MATCHER_SEMANTIC_MODE=AUTO
 export PRED_MATCHER_AUTO_PROMOTION_SAFE_SYNCS=12
 ```
 
-A sync counts toward the safe streak only when the formal promotion gate is eligible, the provider response is valid, veto rate stays within bounds, candidate opportunities are monotonic, and opportunity retention stays above the configured floor. An unsafe sync resets the streak to zero. The streak is persisted in `SyncResult`, survives restart only when model/prompt/matcher pins still match, and a circuit reset also clears it.
-
-Every semantic sync records baseline-vs-candidate opportunity impact:
-
-- baseline and candidate opportunity counts;
-- suppressed and unexpectedly introduced opportunities;
-- opportunity retention rate;
-- aggregate best-execution net profit of suppressed opportunities;
-- maximum suppressed net edge per share.
+A global sync counts toward AUTO only when the formal promotion gate is eligible, the provider response is valid, veto rate stays within bounds, candidate opportunities are monotonic, and opportunity retention stays above the configured floor. An unsafe sync resets the global streak. State survives restart only when model/prompt/matcher pins still match.
 
 Runtime safeguards:
 
@@ -252,37 +243,55 @@ export PRED_MATCHER_VETO_MAX_RATE=0.35
 export PRED_MATCHER_VETO_MIN_OPPORTUNITY_RETENTION=0.50
 ```
 
-The semantic policy is monotonic by design: it can retain or remove heuristic arb relations, never add or upgrade one. A response batch must contain exactly one correctly oriented decision per requested pair.
+The semantic policy is remove-only: it can retain or remove heuristic arb relations, never add or upgrade one.
 
-### Circuit breaker
+### Global circuit breaker
 
-`ENFORCED`, including an `AUTO` rollout after promotion, automatically rolls back to the deterministic baseline and latches the circuit open when any enforcement guard fails, including:
-
-- promotion evidence expires or becomes ineligible after new adjudication;
-- model/prompt/matcher pin mismatch;
-- missing or failing semantic provider;
-- malformed/incomplete semantic response;
-- semantic relation safety limit exceeded;
-- veto rate above `PRED_MATCHER_VETO_MAX_RATE`;
-- opportunity retention below `PRED_MATCHER_VETO_MIN_OPPORTUNITY_RETENTION`;
-- a non-monotonic candidate unexpectedly introduces an opportunity.
-
-A circuit-open sync still writes the fresh deterministic baseline snapshot, so catalog freshness is preserved. `/health` reports the semantic rollout as degraded while the base service remains operational. `/ready` stays ready after a successful rollback sync.
-
-The circuit state is included in durable `SyncResult` and restored on restart. It does **not** auto-close after a healthy sample; explicit reset is required:
+`ENFORCED`, including AUTO after promotion, rolls back to the deterministic baseline and latches the global circuit open when promotion/provider/runtime guards fail. The circuit does not auto-close:
 
 ```bash
 curl -X POST http://localhost:3000/v1/semantic/circuit/reset
 curl -X POST http://localhost:3000/v1/sync
 ```
 
-The reset alone does not prove the next sync safe. `ENFORCED` must pass all guards again; `AUTO` starts a new safe streak.
+## Cohort canary enforcement — v0.15.0
 
-## Production rollout evidence — v0.14.0
+After global AUTO promotion, veto enforcement is partitioned by `relationType × venuePair`. Each cohort has an independent exposure stage, safe streak, error budget, and latching circuit. Default stages are:
 
-Every non-`OFF` semantic sync writes durable evidence to the quality SQLite database before the production snapshot is replaced. The evidence includes requested/effective mode, promotion eligibility, safe streak, circuit state, veto rate, opportunity impact, and one `CONFIRMED`/`VETOED` record per checked arb relation.
+```text
+10% -> 25% -> 50% -> 100%
+```
 
-Inspect the time series and transitions:
+Stable SHA-256 sampling over `cohort|pairKey` determines which vetoed relations are in treatment, so assignments remain stable across syncs and restarts. Canary always starts from the deterministic relation graph and removes only sampled `VETOED` relations; it cannot introduce a new relation or opportunity.
+
+Defaults:
+
+```bash
+# AUTO: enabled by default. ENFORCED: disabled unless explicitly true.
+export PRED_MATCHER_CANARY_ENABLED=true
+export PRED_MATCHER_CANARY_STAGES='0.10,0.25,0.50,1.0'
+export PRED_MATCHER_CANARY_SAFE_SYNCS_PER_STAGE=6
+export PRED_MATCHER_CANARY_MIN_DECISIONS=5
+export PRED_MATCHER_CANARY_MAX_VETO_RATE=0.35
+export PRED_MATCHER_CANARY_MIN_OPPORTUNITY_RETENTION=0.50
+```
+
+A cohort can advance only when it has enough current decisions and its full semantic candidate stays inside both cohort budgets: veto rate and opportunity retention. After the configured safe streak it advances one stage. A budget violation opens only that cohort's circuit and forces its exposure to 0%; other cohorts continue independently.
+
+Inspect or reset canaries:
+
+```bash
+curl http://localhost:3000/v1/semantic/canary/status
+curl -X POST 'http://localhost:3000/v1/semantic/canary/reset?cohort=EQUIVALENT%7Ckalshi-polymarket'
+# Omit cohort to reset every cohort.
+curl -X POST http://localhost:3000/v1/semantic/canary/reset
+```
+
+Canary state is embedded in durable `SyncResult` and rollout evidence. It is restored only when requested mode plus model/prompt/matcher pins still match. One-sync transition flags are cleared on restore, so restart does not synthesize duplicate stage/circuit events.
+
+## Production rollout evidence
+
+Every non-`OFF` semantic sync writes durable evidence to the quality SQLite database before the production snapshot is replaced. Evidence includes requested/effective mode, promotion eligibility, global safe streak/circuit, semantic opportunity impact, canary state, and one `CONFIRMED`/`VETOED` record per checked arb relation. Decision evidence also records whether a veto was actually enforced by the current canary sample.
 
 ```bash
 curl 'http://localhost:3000/v1/semantic/evidence?limit=100'
@@ -292,15 +301,15 @@ curl 'http://localhost:3000/v1/semantic/cohorts?limit=5000'
 curl 'http://localhost:3000/v1/semantic/attribution?limit=5000'
 ```
 
-`/v1/semantic/events` derives operational transitions such as `AUTO_PROMOTED`, enforcement start/stop, circuit open/reset, and safe-streak reset. Cohorts break decisions down by relation type and venue pair.
+`/v1/semantic/events` includes global rollout transitions plus `CANARY_STAGE_ADVANCED` and `CANARY_CIRCUIT_OPENED`. Cohort analytics report proposed vetoes and actual enforced vetoes separately.
 
-Attribution is deliberately conservative. `MANUAL`/`ADJUDICATED` labels can classify a veto as `CORRECT_VETO_BY_LABEL` or `FALSE_VETO_BY_LABEL`. Settlement outcomes can provide strong falsification evidence (`PREVENTED_SETTLEMENT_VIOLATION`) but a consistent settlement only means `NOT_FALSIFIED_BY_SETTLEMENT`; one matching outcome does not prove that two contracts were logically equivalent or that an implication was valid in general.
+Attribution is deliberately conservative. `MANUAL`/`ADJUDICATED` labels can classify a veto as `CORRECT_VETO_BY_LABEL` or `FALSE_VETO_BY_LABEL`. Settlement outcomes can strongly falsify a relation (`PREVENTED_SETTLEMENT_VIOLATION`), but a consistent settlement is only `NOT_FALSIFIED_BY_SETTLEMENT`; one matching outcome does not prove semantic equivalence or implication.
 
 ## Observability
 
-`GET /metrics` includes semantic rollout gauges for requested/effective mode, circuit state, safe streak, AUTO promotion progress, last-sync auto-promotion transition, veto rate, opportunity retention, and suppressed opportunity count.
+`GET /metrics` exposes global semantic mode/circuit/safe-streak metrics plus canary enabled state, aggregate exposure, eligible/enforced veto counts, stage advances, and cohort trips.
 
-`GET /health` includes current app version, matcher version, semantic status, promotion evidence status, and circuit state.
+`GET /health` includes application/matcher versions and the latest durable sync. `GET /v1/semantic/status` includes current semantic and canary runtime status.
 
 ## Shadow API
 
@@ -336,6 +345,7 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.12.0`: statistical semantic promotion gate and opt-in semantic veto policy.
 - `0.13.0`: matcher-pinned/expiring promotion evidence, dry-run vs enforced rollout, opportunity-impact accounting, and latching circuit breaker.
 - `0.14.0`: durable rollout evidence, `AUTO` safe-streak promotion, transition events, cohort analytics, and conservative post-settlement veto attribution.
+- `0.15.0`: stable cohort canary enforcement, staged exposure, independent cohort budgets/circuits, enforced-veto evidence, and canary metrics/API.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
@@ -343,8 +353,8 @@ Backward-compatible features increment `MINOR` while pre-1.0; bug fixes incremen
 
 This remains a scanner, not an atomic two-venue execution engine. Cross-venue fills can race and settlement/venue risk remains.
 
-Historical capture is sampled rather than tick-complete. Promotion quality is bounded by adjudicated-label coverage and historical representativeness. A passing statistical gate and a safe rollout streak reduce measured risk; neither proves semantic correctness.
+Historical capture is sampled rather than tick-complete. Promotion quality is bounded by adjudicated-label coverage and historical representativeness. Statistical gates, safe streaks, and canaries reduce measured rollout risk; they do not prove semantic correctness.
 
-Semantic veto can only reduce the heuristic arb set. It cannot discover opportunities the deterministic matcher missed. When the circuit opens, production intentionally returns to that deterministic baseline.
+Semantic veto can only reduce the heuristic arb set. It cannot discover opportunities the deterministic matcher missed. Global circuit failure intentionally returns to the deterministic baseline; a cohort circuit returns only that cohort to baseline.
 
 SQLite remains single-process; distributed deployment should move persistence interfaces to a shared transactional database.
