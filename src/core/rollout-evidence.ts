@@ -31,7 +31,7 @@ export interface SemanticRolloutEvidence {
   opportunityImpact: SemanticOpportunityImpact;
   guardReasons: string[];
   circuitOpen: boolean;
-  canary?: SemanticCanarySyncResult;
+  canary?: SemanticCanarySyncResult | undefined;
 }
 
 export interface SemanticVetoDecisionEvidence {
