@@ -1,6 +1,13 @@
 import { evaluateSettlementConsistency } from "./settlement.js";
 import { normalizeRelationLabel, relationPairKey, type RelationLabel } from "./quality.js";
-import type { MarketRelation, RelationType, SemanticOpportunityImpact, SemanticRolloutMode, Venue } from "./types.js";
+import type {
+  MarketRelation,
+  RelationType,
+  SemanticCanarySyncResult,
+  SemanticOpportunityImpact,
+  SemanticRolloutMode,
+  Venue
+} from "./types.js";
 import type { MarketSettlement } from "./settlement.js";
 
 export type SemanticVetoAction = "CONFIRMED" | "VETOED";
@@ -24,6 +31,7 @@ export interface SemanticRolloutEvidence {
   opportunityImpact: SemanticOpportunityImpact;
   guardReasons: string[];
   circuitOpen: boolean;
+  canary?: SemanticCanarySyncResult | undefined;
 }
 
 export interface SemanticVetoDecisionEvidence {
@@ -37,6 +45,7 @@ export interface SemanticVetoDecisionEvidence {
   direction?: MarketRelation["direction"];
   relationConfidence: number;
   action: SemanticVetoAction;
+  enforced?: boolean;
   suppressedOpportunity: boolean;
   capturedAt: string;
 }
@@ -48,6 +57,7 @@ export interface SemanticRolloutCohort {
   confirmed: number;
   vetoed: number;
   vetoRate: number;
+  enforcedVetoes: number;
   suppressedOpportunities: number;
 }
 
@@ -57,7 +67,9 @@ export type SemanticRolloutEventType =
   | "ENFORCEMENT_STOPPED"
   | "CIRCUIT_OPENED"
   | "CIRCUIT_RESET_OBSERVED"
-  | "SAFE_STREAK_RESET";
+  | "SAFE_STREAK_RESET"
+  | "CANARY_STAGE_ADVANCED"
+  | "CANARY_CIRCUIT_OPENED";
 
 export interface SemanticRolloutEvent {
   type: SemanticRolloutEventType;
@@ -67,6 +79,7 @@ export interface SemanticRolloutEvent {
   effectiveMode: "DRY_RUN" | "ENFORCED";
   safeStreak: number;
   reasons: string[];
+  cohort?: string;
 }
 
 export type SemanticVetoAttribution =
@@ -124,6 +137,7 @@ export function cohortRolloutDecisions(
       confirmed: values.length - vetoed,
       vetoed,
       vetoRate: values.length === 0 ? 0 : round(vetoed / values.length),
+      enforcedVetoes: values.filter((value) => value.action === "VETOED" && value.enforced === true).length,
       suppressedOpportunities: values.filter((value) => value.suppressedOpportunity).length
     };
   }).sort((a, b) => b.decisions - a.decisions || a.relationType.localeCompare(b.relationType));
@@ -133,7 +147,7 @@ export function deriveRolloutEvents(evidence: readonly SemanticRolloutEvidence[]
   const ordered = [...evidence].sort((a, b) => a.syncedAt.localeCompare(b.syncedAt));
   const events: SemanticRolloutEvent[] = [];
   let previous: SemanticRolloutEvidence | undefined;
-  const push = (type: SemanticRolloutEventType, item: SemanticRolloutEvidence): void => {
+  const push = (type: SemanticRolloutEventType, item: SemanticRolloutEvidence, cohort?: string, reasons = item.guardReasons): void => {
     events.push({
       type,
       evidenceId: item.evidenceId,
@@ -141,7 +155,8 @@ export function deriveRolloutEvents(evidence: readonly SemanticRolloutEvidence[]
       requestedMode: item.requestedMode,
       effectiveMode: item.effectiveMode,
       safeStreak: item.safeStreak,
-      reasons: item.guardReasons
+      reasons,
+      ...(cohort ? { cohort } : {})
     });
   };
   for (const item of ordered) {
@@ -151,6 +166,10 @@ export function deriveRolloutEvents(evidence: readonly SemanticRolloutEvidence[]
     if (item.circuitOpen && !previous?.circuitOpen) push("CIRCUIT_OPENED", item);
     if (!item.circuitOpen && previous?.circuitOpen) push("CIRCUIT_RESET_OBSERVED", item);
     if (item.safeStreak === 0 && (previous?.safeStreak ?? 0) > 0) push("SAFE_STREAK_RESET", item);
+    for (const cohort of item.canary?.cohorts ?? []) {
+      if (cohort.advancedThisSync) push("CANARY_STAGE_ADVANCED", item, cohort.key, cohort.reasons);
+      if (cohort.trippedThisSync) push("CANARY_CIRCUIT_OPENED", item, cohort.key, cohort.reasons);
+    }
     previous = item;
   }
   return events.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));

@@ -18,6 +18,7 @@ const decisions: SemanticVetoDecisionEvidence[] = [
     relationType: "EQUIVALENT",
     relationConfidence: 0.9,
     action: "VETOED",
+    enforced: true,
     suppressedOpportunity: true,
     capturedAt: "2026-09-16T10:00:00Z"
   },
@@ -81,7 +82,7 @@ function evidence(overrides: Partial<SemanticRolloutEvidence>): SemanticRolloutE
 }
 
 describe("rollout evidence analytics", () => {
-  it("breaks veto evidence down by relation type and venue pair", () => {
+  it("breaks veto evidence down by relation type, venue pair, and actual enforcement", () => {
     const cohorts = cohortRolloutDecisions(decisions);
     expect(cohorts).toContainEqual({
       relationType: "EQUIVALENT",
@@ -90,11 +91,12 @@ describe("rollout evidence analytics", () => {
       confirmed: 1,
       vetoed: 1,
       vetoRate: 0.5,
+      enforcedVetoes: 1,
       suppressedOpportunities: 1
     });
   });
 
-  it("derives auto-promotion, enforcement, circuit, and streak-reset events", () => {
+  it("derives global and canary rollout transition events", () => {
     const events = deriveRolloutEvents([
       evidence({ evidenceId: "a", safeStreak: 2, syncedAt: "2026-09-16T10:00:00Z" }),
       evidence({
@@ -102,7 +104,39 @@ describe("rollout evidence analytics", () => {
         syncedAt: "2026-09-16T10:05:00Z",
         effectiveMode: "ENFORCED",
         safeStreak: 3,
-        autoPromotedThisSync: true
+        autoPromotedThisSync: true,
+        canary: {
+          enabled: true,
+          stages: [0.1, 0.25, 0.5, 1],
+          safeSyncsPerStage: 2,
+          minimumDecisions: 1,
+          maximumVetoRate: 1,
+          minimumOpportunityRetentionRate: 0,
+          aggregateExposure: 0.25,
+          eligibleVetoes: 4,
+          enforcedVetoes: 1,
+          advancedCohorts: 1,
+          trippedCohorts: 0,
+          cohorts: [{
+            key: "EQUIVALENT|kalshi-polymarket",
+            relationType: "EQUIVALENT",
+            venuePair: "kalshi-polymarket",
+            stageIndex: 1,
+            exposure: 0.25,
+            safeStreak: 0,
+            circuitOpen: false,
+            reasons: [],
+            decisions: 4,
+            vetoed: 4,
+            vetoRate: 1,
+            baselineOpportunities: 0,
+            suppressedOpportunities: 0,
+            opportunityRetentionRate: null,
+            enforcedVetoes: 1,
+            advancedThisSync: true,
+            trippedThisSync: false
+          }]
+        }
       }),
       evidence({
         evidenceId: "c",
@@ -119,7 +153,8 @@ describe("rollout evidence analytics", () => {
       "ENFORCEMENT_STARTED",
       "ENFORCEMENT_STOPPED",
       "CIRCUIT_OPENED",
-      "SAFE_STREAK_RESET"
+      "SAFE_STREAK_RESET",
+      "CANARY_STAGE_ADVANCED"
     ]));
   });
 

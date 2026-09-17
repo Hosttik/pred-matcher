@@ -27,6 +27,7 @@ export function renderPrometheusMetrics(
   const persistence = store.getPersistenceStatus();
   const lastSync = store.getLastSync();
   const semantic = lastSync?.semanticPolicy;
+  const canary = semantic?.canary;
   const polymarket = store.listMarkets("polymarket").length;
   const kalshi = store.listMarkets("kalshi").length;
   const requestedMode = semantic?.requestedMode ?? "OFF";
@@ -79,6 +80,20 @@ export function renderPrometheusMetrics(
     "# HELP pred_matcher_semantic_suppressed_opportunities Opportunities removed by the semantic candidate policy in the last sync.",
     "# TYPE pred_matcher_semantic_suppressed_opportunities gauge",
     `pred_matcher_semantic_suppressed_opportunities ${semantic?.opportunityImpact.suppressedOpportunities ?? 0}`,
+    "# HELP pred_matcher_semantic_canary_enabled Whether cohort canary enforcement is enabled.",
+    "# TYPE pred_matcher_semantic_canary_enabled gauge",
+    `pred_matcher_semantic_canary_enabled ${canary?.enabled ? 1 : 0}`,
+    "# HELP pred_matcher_semantic_canary_exposure Fraction of veto-eligible relations actually enforced in the last sync.",
+    "# TYPE pred_matcher_semantic_canary_exposure gauge",
+    `pred_matcher_semantic_canary_exposure ${canary?.aggregateExposure ?? 0}`,
+    "# HELP pred_matcher_semantic_canary_vetoes Semantic veto counts at the canary boundary.",
+    "# TYPE pred_matcher_semantic_canary_vetoes gauge",
+    `pred_matcher_semantic_canary_vetoes{kind="eligible"} ${canary?.eligibleVetoes ?? 0}`,
+    `pred_matcher_semantic_canary_vetoes{kind="enforced"} ${canary?.enforcedVetoes ?? 0}`,
+    "# HELP pred_matcher_semantic_canary_cohorts Cohort canary transitions in the last sync.",
+    "# TYPE pred_matcher_semantic_canary_cohorts gauge",
+    `pred_matcher_semantic_canary_cohorts{state="advanced"} ${canary?.advancedCohorts ?? 0}`,
+    `pred_matcher_semantic_canary_cohorts{state="tripped"} ${canary?.trippedCohorts ?? 0}`,
     "# HELP pred_matcher_persistence_enabled Durable persistence is configured.",
     "# TYPE pred_matcher_persistence_enabled gauge",
     `pred_matcher_persistence_enabled ${persistence.enabled ? 1 : 0}`,
