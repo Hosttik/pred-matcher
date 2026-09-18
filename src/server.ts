@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { OpenAISemanticVerifier } from "./adapters/openai-semantic-verifier.js";
+import { DEFAULT_TYPESAFE_MODEL, TypeSafeSemanticVerifier } from "./adapters/typesafe-semantic-verifier.js";
+import type { SemanticVerifier } from "./core/semantic-verifier.js";
 import { buildContractSpec } from "./core/contract.js";
 import { findOpportunities } from "./core/opportunities.js";
 import type { OpportunityType, Venue } from "./core/types.js";
@@ -73,7 +75,26 @@ function createDatasetRepository(): DatasetRepository {
   return new DatasetRepository(path, maxSnapshots);
 }
 
-function createSemanticVerifier(): OpenAISemanticVerifier | undefined {
+function semanticProvider(): "openai" | "typesafe" {
+  const raw = process.env.PRED_MATCHER_SHADOW_PROVIDER?.trim().toLowerCase();
+  if (!raw || raw === "openai") return "openai";
+  if (raw === "typesafe") return "typesafe";
+  throw new Error("unsupported_shadow_provider:" + raw);
+}
+
+function createSemanticVerifier(): SemanticVerifier | undefined {
+  const provider = semanticProvider();
+  if (provider === "typesafe") {
+    const apiKey = process.env.TYPESAFE_API_KEY?.trim();
+    if (!apiKey) return undefined;
+    return new TypeSafeSemanticVerifier({
+      apiKey,
+      model: process.env.PRED_MATCHER_SHADOW_MODEL?.trim() || DEFAULT_TYPESAFE_MODEL,
+      baseUrl: "https://api.typesafe.ai/v1",
+      timeoutMs: configuredPositiveInt("PRED_MATCHER_SHADOW_TIMEOUT_MS", 45_000)
+    });
+  }
+
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) return undefined;
   return new OpenAISemanticVerifier({
