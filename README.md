@@ -2,7 +2,7 @@
 
 Durable prediction-market semantic matcher and executable-opportunity scanner for Polymarket and Kalshi.
 
-Current version: **0.15.0**.
+Current version: **0.16.0**.
 
 ## Scope
 
@@ -12,7 +12,7 @@ Current version: **0.15.0**.
 - Live Polymarket/Kalshi books with relation-local recomputation.
 - SQLite/WAL operational state, labels, settlements, historical snapshots, and replay.
 - Precision/recall/F1 and `falseArbRate` evaluation plus frozen CI regression gates.
-- OpenAI semantic verifier in observational shadow mode.
+- Pluggable semantic verifier with OpenAI and TypeSafe Jev providers in observational shadow mode.
 - Historical multi-model A/B with prompt/model/matcher versioning, usage/cost accounting, and disagreement review.
 - Statistical semantic promotion gate.
 - Controlled semantic rollout with `DRY_RUN`, `AUTO`, `ENFORCED`, durable rollout evidence, cohort canaries, and latching circuit breakers.
@@ -127,6 +127,7 @@ Shadow output is observational only: it never replaces production relations and 
 
 ```bash
 export PRED_MATCHER_SHADOW_ENABLED=true
+export PRED_MATCHER_SHADOW_PROVIDER=openai
 export OPENAI_API_KEY='...'
 export PRED_MATCHER_SHADOW_MODEL='gpt-5.6-luna'
 export PRED_MATCHER_SHADOW_MIN_CANDIDATE_SCORE=0.20
@@ -137,7 +138,19 @@ curl -X POST http://localhost:3000/v1/shadow/run
 curl http://localhost:3000/v1/shadow/report
 ```
 
-The verifier receives contract-semantic fields only: IDs, venue, title/subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. OpenAI Responses requests use `store: false`, and runtime API-key traffic is fixed to `https://api.openai.com/v1`.
+The verifier receives contract-semantic fields only: IDs, venue, title/subtitle, rules, resolution source, close time, and structured settlement/strike metadata. Prices and order books are excluded. OpenAI Responses requests use `store: false`, and runtime OpenAI API-key traffic is fixed to `https://api.openai.com/v1`.
+
+TypeSafe Jev is also available as a shadow/evaluation provider:
+
+```bash
+export PRED_MATCHER_SHADOW_ENABLED=true
+export PRED_MATCHER_SHADOW_PROVIDER=typesafe
+export TYPESAFE_API_KEY='...'
+export PRED_MATCHER_SHADOW_MODEL='jev-1.13.0'
+curl -X POST http://localhost:3000/v1/shadow/run
+```
+
+The Jev adapter sends each contract pair as structured state and asks independent Noul questions for same-event identity, equivalence, both implication directions, threshold nesting, time nesting, and material settlement differences. A deterministic local combiner maps those calibrated probabilities into the existing relation types. The default is the pinned `jev-1.13.0`; aliases such as `jev-latest` are accepted but are not recommended for promotion evidence because aliases can move.
 
 The prompt is versioned as `semantic-contract-v1`. Shadow observations also store the deterministic matcher version (`heuristic-v1`). Matcher provenance is independent from package SemVer; changing deterministic matcher semantics requires a matcher-version bump before promotion evidence can be reused.
 
@@ -147,14 +160,15 @@ Historical evaluation is explicit and not part of normal sync:
 
 ```bash
 export OPENAI_API_KEY='...'
-export PRED_MATCHER_SHADOW_MODELS='gpt-5.6-luna,gpt-5.6-terra'
+export TYPESAFE_API_KEY='...'
+export PRED_MATCHER_SHADOW_MODELS='openai:gpt-5.6-luna,typesafe:jev-1.13.0'
 export PRED_MATCHER_SHADOW_BACKFILL_FRAMES=100
 export PRED_MATCHER_SHADOW_BACKFILL_MAX_PAIRS=300
 export PRED_MATCHER_SHADOW_BATCH_SIZE=10
 npm run shadow:backfill
 ```
 
-Every configured model receives the same deduplicated selected pair set. Runs persist prompt/model/matcher identity, token usage, cumulative latency, estimated cost, quality on overlapping gold labels, pairwise disagreement, and review candidates.
+Every configured model receives the same deduplicated selected pair set. Entries in `PRED_MATCHER_SHADOW_MODELS` may be provider-qualified (`openai:model` or `typesafe:model`); unqualified names use `PRED_MATCHER_SHADOW_PROVIDER`, which defaults to OpenAI. Runs persist provider/prompt/model/matcher identity, token usage, cumulative latency, estimated cost, quality on overlapping gold labels, pairwise disagreement, and review candidates.
 
 ```bash
 curl 'http://localhost:3000/v1/shadow/experiments?limit=20'
@@ -346,6 +360,7 @@ The project follows Semantic Versioning (`MAJOR.MINOR.PATCH`).
 - `0.13.0`: matcher-pinned/expiring promotion evidence, dry-run vs enforced rollout, opportunity-impact accounting, and latching circuit breaker.
 - `0.14.0`: durable rollout evidence, `AUTO` safe-streak promotion, transition events, cohort analytics, and conservative post-settlement veto attribution.
 - `0.15.0`: stable cohort canary enforcement, staged exposure, independent cohort budgets/circuits, enforced-veto evidence, and canary metrics/API.
+- `0.16.0`: TypeSafe Jev semantic verifier adapter, provider-selectable live shadow, and mixed-provider historical A/B.
 
 Backward-compatible features increment `MINOR` while pre-1.0; bug fixes increment `PATCH`.
 
